@@ -1,5 +1,6 @@
 """
 Admin / diagnostic / plugin / MCP tools
+管理/诊断/插件/MCP 工具
 """
 
 import json
@@ -11,14 +12,17 @@ from tools_base import tool, _registry, log
 
 
 # ============================================================
-#  Plugin system
+#  Plugin system - 插件系统
 # ============================================================
 
 _plugins_dir = os.path.join(os.environ.get("AGENT_DATA", os.path.dirname(os.path.abspath(__file__))), "plugins")
 
 def _exec_plugin(code, source="<plugin>"):
     """Execute plugin code in a controlled environment. Plugins can use @tool to register tools.
-    Restricted builtins: removes eval/exec/compile/__import__ and other dangerous functions."""
+    在受控环境中执行插件代码。插件可以使用@tool 注册工具。
+    Restricted builtins: removes eval/exec/compile/__import__ and other dangerous functions.
+    受限内置函数：移除 eval/exec/compile/__import__ 等危险函数。
+    """
     import builtins as _bi
     safe_builtins = {k: getattr(_bi, k) for k in dir(_bi)
                      if k not in ("eval", "exec", "compile", "__import__",
@@ -41,7 +45,9 @@ def _exec_plugin(code, source="<plugin>"):
 
 
 def _load_plugins():
-    """Scan plugins/ directory at startup and load all custom tools"""
+    """Scan plugins/ directory at startup and load all custom tools
+    启动时扫描 plugins/目录并加载所有自定义工具
+    """
     if not os.path.isdir(_plugins_dir):
         return
     loaded = 0
