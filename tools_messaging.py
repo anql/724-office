@@ -1,5 +1,6 @@
 """
 Messaging / file / scheduling / media tools
+消息/文件/调度/媒体工具
 """
 
 import json
@@ -11,10 +12,13 @@ from tools_base import tool, log, _resolve_path, _strip_markdown, _split_message
 import messaging
 
 # POI coordinate cache: search_nearby results auto-cached, send_location looks up by name/address
+# POI 坐标缓存：search_nearby 结果自动缓存，send_location 按名称/地址查找
 _poi_cache = {}  # key: poi_name or address -> {"lat": float, "lng": float, "name": str, "address": str}
 
 def _cache_poi(name, address, location_str):
-    """Cache POI coordinates, location_str format: lng,lat"""
+    """Cache POI coordinates, location_str format: lng,lat
+    缓存 POI 坐标，location_str 格式：lng,lat
+    """
     coords = location_str.split(",")
     if len(coords) == 2:
         entry = {"lat": float(coords[1]), "lng": float(coords[0]), "name": name, "address": address}
@@ -24,7 +28,9 @@ def _cache_poi(name, address, location_str):
             _poi_cache[address] = entry
 
 def _lookup_poi(label, address):
-    """Look up POI coordinates from cache, returns (lat, lng) or None"""
+    """Look up POI coordinates from cache, returns (lat, lng) or None
+    从缓存查找 POI 坐标，返回 (lat, lng) 或 None
+    """
     for key in [label, address]:
         if key and key in _poi_cache:
             e = _poi_cache[key]
@@ -36,8 +42,9 @@ def _lookup_poi(label, address):
     return None
 import scheduler
 
-# --- Basic tools ---
+# --- Basic tools - 基础工具 ---
 
+# 危险命令黑名单 (Dangerous command blacklist)
 _DANGEROUS_CMDS = ['rm -rf /', 'rm -rf /*', 'dd if=', 'mkfs', ':(){', 'fork bomb',
                    'chmod -R 777 /', 'chown -R', '> /dev/sda', 'shutdown', 'reboot',
                    'init 0', 'init 6', 'kill -9 1', 'killall']
@@ -48,8 +55,12 @@ _DANGEROUS_CMDS = ['rm -rf /', 'rm -rf /*', 'dd if=', 'mkfs', ':(){', 'fork bomb
        "timeout": {"type": "integer", "description": "Timeout in seconds, default 60, max 300. Recommended 180-300 for install/download operations"}},
       ["command"])
 def tool_exec(args, ctx):
+    """执行 shell 命令
+    Execute shell command
+    """
     cmd = args["command"]
     # Dangerous command blacklist check
+    # 危险命令黑名单检查
     cmd_lower = cmd.lower().strip()
     for dangerous in _DANGEROUS_CMDS:
         if dangerous in cmd_lower:
@@ -70,6 +81,7 @@ def tool_exec(args, ctx):
         if result.returncode != 0:
             output += f"\n[exit code: {result.returncode}]"
         # Prevent large output from blowing up LLM context
+        # 防止超大输出撑爆 LLM 上下文
         if len(output) > 8000:
             trunc_msg = "\n... [truncated, total %d chars]" % len(output)
             output = output[:8000] + trunc_msg
