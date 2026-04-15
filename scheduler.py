@@ -1,10 +1,25 @@
 """
 Built-in Scheduler — One-shot Delayed Tasks + Cron Recurring Tasks
+内置调度器 — 一次性延迟任务 + Cron 循环任务
 
 Persisted in jobs.json, background thread checks every 10s.
+持久化在 jobs.json，后台线程每 10 秒检查一次。
 On trigger, calls chat_fn(message, "scheduler") -> LLM processing -> sends messages via tools.
+触发时调用 chat_fn(message, "scheduler") -> LLM 处理 -> 通过工具发送消息。
 
 Dependencies: stdlib + croniter (pip install croniter)
+依赖：标准库 + croniter（需 pip install croniter）
+
+## Task Types: 任务类型
+1. One-shot delayed tasks: 一次性延迟任务（delay_seconds 或 target_time）
+2. Cron recurring tasks: Cron 循环任务（cron_expr）
+3. Auto-correct year: 自动修正年份（LLM 可能使用过期年份）
+
+## Features: 功能特性
+- 多租户支持（owner_id 隔离）
+- 静默任务（不发送通知）
+- 复杂任务独立会话（避免上下文干扰）
+- 不活动保护（用户 3 天无活动则跳过面向用户的任务）
 """
 
 import json
@@ -30,16 +45,21 @@ _users = {}      # Multi-tenant: sender_id -> user_config
 _sessions_dir = "" 
 
 # Silent task keywords: when task prompt contains these words, LLM not calling message is expected, skip fallback
+# 静默任务关键词：任务提示包含这些词时，LLM 不调用 message 是预期的，跳过回退逻辑
 SILENT_KEYWORDS = ["silent", "no_notify", "no_disturb", "skip_notify", "on_failure_only", "on_archive_failure", "sync"]
 
 # Complex task keywords: these tasks need multi-step tool calls, shared session context noise causes hallucination
 # Give them clean temporary sessions, bridge results back to main session after execution
+# 复杂任务关键词：这些任务需要多步工具调用，共享会话上下文噪声会导致幻觉
+# 给它们干净的临时会话，执行后桥接结果回主会话
 COMPLEX_TASK_KEYWORDS = ["self_check", "review", "review_task", "audit_task", "audit", "patrol", "diary", "digest"]
 
 # Inactivity guard: auto-skip user-facing cron tasks when user is silent > 3 days
-INACTIVITY_THRESHOLD = 3 * 86400  # 3 days
+# 不活动保护：用户静默超过 3 天时自动跳过面向用户的 Cron 任务
+INACTIVITY_THRESHOLD = 3 * 86400  # 3 days (3 天，单位秒)
 
 # Internal tasks: never skip even if user is inactive (housekeeping)
+# 内部任务：即使用户不活动也绝不跳过（系统维护任务）
 INTERNAL_TASK_KEYWORDS = [
     "archive", "diary", "review", "self_check", "digest", "compact", "sync", "archive",
     "audit", "review_task", "audit_task", "patrol"
@@ -74,7 +94,15 @@ def _is_complex_task(job):
 
 
 def init(jobs_file, chat_fn, users=None, sessions_dir=None):
-    """Initialize scheduler. chat_fn signature: chat_fn(message, session_key, images=None, user_config=None)"""
+    """Initialize scheduler. chat_fn signature: chat_fn(message, session_key, images=None, user_config=None)
+    初始化调度器
+    
+    参数:
+        jobs_file: 任务持久化文件路径（jobs.json）
+        chat_fn: LLM 聊天函数，签名：chat_fn(message, session_key, images=None, user_config=None)
+        users: 多租户用户配置字典
+        sessions_dir: 会话存储目录
+    """
     global _jobs_file, _chat_fn, _users, _sessions_dir
     _jobs_file = jobs_file
     _chat_fn = chat_fn
@@ -85,7 +113,9 @@ def init(jobs_file, chat_fn, users=None, sessions_dir=None):
 
 
 def start():
-    """Start background check thread"""
+    """Start background check thread
+    启动后台检查线程
+    """
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
 
@@ -95,7 +125,31 @@ def start():
 # ============================================================
 
 def add(args):
-    """Create a scheduled task. args: name, message, delay_seconds?, cron_expr?, once?"""
+    """Create a scheduled task. args: name, message, delay_seconds?, cron_expr?, once?
+    创建调度任务
+    
+    支持三种触发方式：
+    1. delay_seconds: 延迟多少秒后执行
+    2. target_time: 指定具体时间（自动修正年份）
+    3. cron_expr: Cron 表达式（循环任务）
+    
+    参数:
+        name: 任务名称
+        message: 任务提示词（LLM 执行的内容）
+        delay_seconds: 延迟秒数（可选）
+        cron_expr: Cron 表达式（可选）
+        once: 是否一次性（可选，默认 True）
+        target_time: 目标时间 'YYYY-MM-DD HH:MM'（可选）
+        owner_id: 所有者 ID（多租户）
+        group_id: 群 ID（群任务）
+    
+    返回:
+        创建成功返回确认信息，失败返回错误字符串
+    
+    特性:
+        - 自动修正年份：LLM 可能使用过期年份，自动修正到今年或明年
+        - 同名任务覆盖：如果任务已存在则替换
+    """
     name = args["name"]
     message = args["message"]
     delay = args.get("delay_seconds")
@@ -110,6 +164,7 @@ def add(args):
             parsed_trigger_at = target_dt.timestamp()
             if parsed_trigger_at <= time.time():
                 # Auto-correct year: LLM training data may use expired year
+                # 自动修正年份：LLM 训练数据可能使用过期年份
                 now_dt = datetime.now(CST)
                 corrected_dt = target_dt.replace(year=now_dt.year)
                 if corrected_dt.timestamp() <= time.time():
@@ -139,18 +194,18 @@ def add(args):
         else:
             trigger_at = time.time() + delay
         job["trigger_at"] = trigger_at
-        job["type"] = "once"
+        job["type"] = "once"  # 一次性任务
         trigger_str = datetime.fromtimestamp(trigger_at, CST).strftime("%Y-%m-%d %H:%M:%S CST")
         desc = f"One-shot task, will trigger at {trigger_str} trigger"
     elif cron_expr:
         job["cron_expr"] = cron_expr
-        job["type"] = "once_cron" if once else "cron"
+        job["type"] = "once_cron" if once else "cron"  # 一次性 Cron 或循环 Cron
         desc = f"{'one-shot' if once else 'recurring'}scheduled task, cron: {cron_expr}"
     else:
         return "[error] need delay_seconds or cron_expr"
 
     with _jobs_lock:
-        _jobs[:] = [j for j in _jobs if j["name"] != name]
+        _jobs[:] = [j for j in _jobs if j["name"] != name]  # 移除同名任务
         _jobs.append(job)
         _save_jobs()
 
