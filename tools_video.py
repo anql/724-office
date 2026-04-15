@@ -1,5 +1,12 @@
 """
 Video processing tools — trim, bgm, generate, auto_cut (silence removal)
+视频处理工具 — 剪辑、背景音乐、生成、自动剪辑（静音移除）
+
+本模块提供完整的视频处理功能：
+- trim_video: 剪辑视频（手动或自动移除静音）
+- add_bgm: 添加背景音乐
+- generate_video: 生成视频（从图片/文本）
+- 自动静音检测和移除
 """
 
 import json
@@ -12,10 +19,23 @@ import messaging
 
 from tools_base import tool, log
 
-# --- Helper functions ---
+# --- Helper functions - 辅助函数 ---
 
 def _ensure_local(path, workspace, label="file"):
-    """If path is a URL, download to /tmp/ and return local path; otherwise return as-is"""
+    """If path is a URL, download to /tmp/ and return local path; otherwise return as-is
+    确保文件在本地：如果是 URL 则下载到/tmp/，否则直接返回
+    
+    参数:
+        path: 文件路径或 URL
+        workspace: 工作空间目录
+        label: 文件标签（用于生成临时文件名）
+    
+    返回:
+        本地文件路径
+    
+    用途:
+        统一处理本地文件和远程 URL，确保后续 FFmpeg 命令可以访问
+    """
     if path.startswith("http://") or path.startswith("https://"):
         ext = os.path.splitext(urllib.parse.urlparse(path).path)[1] or ".mp4"
         local = "/tmp/agent_%s_%d%s" % (label, int(time.time()), ext)
@@ -26,16 +46,41 @@ def _ensure_local(path, workspace, label="file"):
 
 
 def _video_output_path(workspace, suffix=""):
-    """Generate output path under workspace/files/YYYY-MM/"""
+    """Generate output path under workspace/files/YYYY-MM/
+    生成视频输出路径
+    
+    按年月组织视频文件，便于管理：
+    workspace/files/2024-01/video_20240115_120000.mp4
+    
+    参数:
+        workspace: 工作空间目录
+        suffix: 文件名后缀（如_autocut, _compressed）
+    
+    返回:
+        完整的输出文件路径
+    """
     from datetime import datetime, timezone, timedelta
-    now = datetime.now(timezone(timedelta(hours=8)))
+    now = datetime.now(timezone(timedelta(hours=8)))  # 北京时间
     out_dir = os.path.join(workspace, "files", now.strftime("%Y-%m"))
     os.makedirs(out_dir, exist_ok=True)
     return os.path.join(out_dir, "video_%s%s.mp4" % (now.strftime("%Y%m%d_%H%M%S"), suffix))
 
 
 def _compress_if_needed(path, max_mb=3):
-    """If video exceeds max_mb, compress and return new path"""
+    """If video exceeds max_mb, compress and return new path
+    如果视频超过指定大小则压缩
+    
+    使用 FFmpeg H.264 编码压缩视频，适合微信等平台发送：
+    - CRF 28: 较高压缩率（质量稍低，文件更小）
+    - AAC 音频：128kbps
+    
+    参数:
+        path: 原始视频路径
+        max_mb: 最大文件大小（MB），默认 3MB
+    
+    返回:
+        压缩后的视频路径（如果不需要压缩则返回原路径）
+    """
     size_mb = os.path.getsize(path) / 1024 / 1024
     if size_mb <= max_mb:
         return path
@@ -50,17 +95,44 @@ def _compress_if_needed(path, max_mb=3):
 
 
 def _detect_nonsilent_segments(audio_path, silence_thresh_db=-40, min_silence_ms=500, padding_ms=100):
-    """Use ffmpeg silencedetect to find silent segments, return non-silent time ranges [(start, end), ...]"""
+    """Use ffmpeg silencedetect to find silent segments, return non-silent time ranges [(start, end), ...]
+    检测非静音片段
+    
+    使用 FFmpeg 的 silencedetect 滤镜分析音频，找出所有非静音时间段。
+    用于自动剪辑说话视频中的停顿/沉默部分。
+    
+    参数:
+        audio_path: 音频文件路径（或视频文件）
+        silence_thresh_db: 静音阈值（分贝），默认 -40dB
+            - 更负的值（如 -50）：只检测非常安静的片段
+            - 较正值（如 -30）：更激进，检测更多低音量片段
+        min_silence_ms: 最小静音时长（毫秒），默认 500ms
+            - 短于此值的静音会被忽略
+        padding_ms: 缓冲时间（毫秒），默认 100ms
+            - 在非静音片段前后保留的缓冲，避免剪得太突兀
+    
+    返回:
+        非静音时间段列表 [(start, end), ...]，单位秒
+        如果无法分析返回 None
+    
+    算法步骤:
+        1. 使用 silencedetect 滤镜检测静音片段
+        2. 解析输出获取静音开始/结束时间
+        3. 计算非静音片段（静音之间的部分）
+        4. 添加缓冲时间
+        5. 合并重叠片段
+    """
     # Use ffmpeg silencedetect filter (pure ffmpeg, no pydub dependency)
+    # 使用 ffmpeg silencedetect 滤镜（纯 ffmpeg，无需 pydub 依赖）
     cmd = [
         "ffmpeg", "-i", audio_path, "-af",
         "silencedetect=noise=%ddB:d=%.3f" % (silence_thresh_db, min_silence_ms / 1000.0),
-        "-f", "null", "-"
+        "-f", "null", "-"  # 不输出文件，只分析
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     stderr = result.stderr
 
-    # Get total duration
+    # Get total duration (获取总时长)
     duration = None
     for line in stderr.split("\n"):
         if "Duration:" in line:
@@ -69,14 +141,14 @@ def _detect_nonsilent_segments(audio_path, silence_thresh_db=-40, min_silence_ms
             m = re.search(r"Duration:\s+(\d+):(\d+):(\d+\.\d+)", line)
             if m:
                 h, mins, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
-                duration = h * 3600 + mins * 60 + s
+                duration = h * 3600 + mins * 60 + s  # 转换为秒
                 break
 
     if duration is None:
         log.warning("[video] could not detect duration, skipping silence removal")
         return None
 
-    # Parse silencedetect output
+    # Parse silencedetect output (解析静音检测结果)
     import re
     silence_starts = []
     silence_ends = []
@@ -92,27 +164,28 @@ def _detect_nonsilent_segments(audio_path, silence_thresh_db=-40, min_silence_ms
 
     if not silence_starts:
         log.info("[video] no silence detected")
-        return [(0, duration)]
+        return [(0, duration)]  # 没有静音，返回完整视频
 
     # Build non-silent segments (add padding to avoid cutting too tight)
-    pad = padding_ms / 1000.0
+    # 构建非静音片段（添加缓冲避免剪得太突兀）
+    pad = padding_ms / 1000.0  # 转换为秒
     segments = []
 
-    # If audio does not start with silence
+    # If audio does not start with silence (如果音频不是从静音开始)
     if silence_starts[0] > 0.1:
         segments.append((0, silence_starts[0] + pad))
 
-    # Non-silent segments between silence gaps
+    # Non-silent segments between silence gaps (静音间隙之间的非静音片段)
     for i, end in enumerate(silence_ends):
         seg_start = max(0, end - pad)
         if i + 1 < len(silence_starts):
             seg_end = min(duration, silence_starts[i + 1] + pad)
         else:
             seg_end = duration
-        if seg_end - seg_start > 0.1:  # Ignore very short fragments
+        if seg_end - seg_start > 0.1:  # Ignore very short fragments (忽略过短片段)
             segments.append((seg_start, seg_end))
 
-    # Merge overlapping segments
+    # Merge overlapping segments (合并重叠片段)
     if not segments:
         return [(0, duration)]
 
