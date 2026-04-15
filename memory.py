@@ -1,13 +1,26 @@
 """
 Memory System — Core algorithms extracted from SimpleMem
+记忆系统 — 从 SimpleMem 提取的核心算法
 
-Three-stage pipeline:
+Three-stage pipeline: 三阶段流水线
 1. Compress: dialogue -> LLM extracts structured memories (key facts + people + time + keywords)
+   压缩：对话 -> LLM 提取结构化记忆（关键事实 + 人物 + 时间 + 关键词）
 2. Dedup: cosine similarity between new and existing memories, >threshold skip
+   去重：新旧记忆之间的余弦相似度，超过阈值则跳过
 3. Retrieve: user message -> embedding -> LanceDB vector search -> return relevant memories
+   检索：用户消息 -> 嵌入向量 -> LanceDB 向量搜索 -> 返回相关记忆
 
 Storage: LanceDB (embedded, file-level, no standalone service)
+存储：LanceDB（嵌入式，文件级，无需独立服务）
 Vectorization: Zhipu Embedding-3 API (1024 dimensions)
+向量化：智谱 Embedding-3 API（1024 维）
+
+## Features: 功能特性
+- 多租户支持：每个用户独立的 memories_{user_id}表
+- 异步压缩：对话后异步压缩到长期记忆
+- 语义检索：向量相似度搜索，非关键词匹配
+- 自动去重：防止重复记忆
+- 上下文缓存：零延迟检索（针对硬件通道）
 """
 
 import json
@@ -24,16 +37,17 @@ log = logging.getLogger("agent")
 CST = timezone(timedelta(hours=8))
 
 # ============================================================
-#  Module State
+#  Module State - 模块状态
 # ============================================================
 
-_config = {}        # memory config section
-_llm_config = {}    # models config (for calling LLM during compression)
-_db = None          # LanceDB connection
-_tables = {}        # table_name -> LanceDB table (multi-tenant: per-user tables)
-_table_lock = threading.Lock()  # Protect _tables and table operations
-_enabled = False
+_config = {}        # memory config section (记忆配置)
+_llm_config = {}    # models config (for calling LLM during compression) (模型配置，用于压缩时调用 LLM)
+_db = None          # LanceDB connection (LanceDB 连接)
+_tables = {}        # table_name -> LanceDB table (multi-tenant: per-user tables) (多租户：每用户独立表)
+_table_lock = threading.Lock()  # Protect _tables and table operations (保护_tables 和表操作的线程锁)
+_enabled = False    # 是否启用
 _context_cache = {} # session_key -> str (pre-computed memory summary, zero-latency for hardware channels)
+                    # 会话键 -> 预计算的记忆摘要（硬件通道零延迟）
 
 # ============================================================
 #  Public API (4 functions)
@@ -41,7 +55,24 @@ _context_cache = {} # session_key -> str (pre-computed memory summary, zero-late
 
 
 def init(config, llm_config, db_path):
-    """Initialize LanceDB connection + embedding config. Called once at startup by xiaowang.py."""
+    """Initialize LanceDB connection + embedding config. Called once at startup by xiaowang.py.
+    初始化记忆系统
+    
+    参数:
+        config: 完整配置（含 memory 和 embedding_api）
+        llm_config: LLM 模型配置（用于压缩对话）
+        db_path: LanceDB 数据库路径
+    
+    初始化流程:
+        1. 检查 memory.enabled 配置
+        2. 检查 embedding API 密钥
+        3. 连接 LanceDB
+        4. 设置启用状态
+    
+    注意:
+        - 由 xiaowang.py 在启动时调用一次
+        - 多租户模式下每个用户有独立表
+    """
     global _config, _llm_config, _db, _table, _enabled
 
     mem_cfg = config.get("memory", {})
@@ -61,6 +92,7 @@ def init(config, llm_config, db_path):
         import lancedb
         _db = lancedb.connect(db_path)
         # Multi-tenant: each user has independent memories_{user_id} table, created on demand
+        # 多租户：每个用户有独立的 memories_{user_id}表，按需创建
         _enabled = True
         log.info("[memory] initialized, db_path=%s" % db_path)
     except Exception as e:
@@ -68,12 +100,26 @@ def init(config, llm_config, db_path):
 
 
 def _get_table(user_id=None):
-    """Get user LanceDB table (lazy-created, thread-safe). user_id=None returns default memories table."""
+    """Get user LanceDB table (lazy-created, thread-safe). user_id=None returns default memories table.
+    获取用户的 LanceDB 表（懒加载创建，线程安全）
+    
+    参数:
+        user_id: 用户 ID（None 返回默认表）
+    
+    返回:
+        LanceDB 表对象
+    
+    特性:
+        - 懒加载：首次访问时创建
+        - 线程安全：使用_table_lock 保护
+        - 双重检查：避免并发创建
+        - 自动初始化：表不存在时创建种子表
+    """
     table_name = f"memories_{user_id}" if user_id else "memories"
     if table_name in _tables:
         return _tables[table_name]
     with _table_lock:
-        # Double check
+        # Double check (双重检查)
         if table_name in _tables:
             return _tables[table_name]
         try:
@@ -83,6 +129,7 @@ def _get_table(user_id=None):
             _tables[table_name] = t
             return t
         except Exception:
+            # 表不存在，创建新表
             import numpy as np
             seed = [{
                 "id": "seed",
@@ -93,7 +140,7 @@ def _get_table(user_id=None):
                 "topic": "system",
                 "session_key": "init",
                 "created_at": time.time(),
-                "vector": np.zeros(1024).tolist(),
+                "vector": np.zeros(1024).tolist(),  # 零向量种子
             }]
             t = _db.create_table(table_name, seed)
             log.info("[memory] created new table '%s'" % table_name)
