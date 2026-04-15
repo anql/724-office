@@ -1,8 +1,11 @@
 """
 LLM Calls + Tool Use Loop + Session Management
+LLM 调用 + 工具使用循环 + 会话管理
 
 Core loop: user message -> LLM -> tool calls -> execute -> LLM -> ... -> final reply
+核心循环：用户消息 -> LLM -> 工具调用 -> 执行 -> LLM -> ... -> 最终回复
 Multimodal support: images passed via image_url (base64) to LLM.
+多模态支持：图片通过 image_url (base64) 传递给 LLM。
 """
 
 import base64
@@ -20,29 +23,37 @@ log = logging.getLogger("agent")
 CST = timezone(timedelta(hours=8))
 
 # ============================================================
-#  Initialization (injected by xiaowang.py)
+#  Initialization (injected by xiaowang.py) - 初始化
 # ============================================================
 
-_config = {}       # models config
-_users = {}        # sender_id -> {owner_id, workspace, model, name}
-_sessions_dir = ""
-MAX_SESSION_MESSAGES = 40
-MAX_SCHEDULER_MESSAGES = 200
-VOICE_SESSION_MESSAGES = 10
+_config = {}       # models config (模型配置)
+_users = {}        # sender_id -> {owner_id, workspace, model, name} (用户路由表)
+_sessions_dir = "" # 会话存储目录
+MAX_SESSION_MESSAGES = 40  # 普通会话最大消息数
+MAX_SCHEDULER_MESSAGES = 200  # 调度器会话最大消息数
+VOICE_SESSION_MESSAGES = 10  # 语音会话消息数限制
 
 
 def _is_voice_session(session_key: str) -> bool:
+    """判断是否为语音会话
+    Check if session is voice session
+    """
     return session_key == "voice" or session_key.startswith("voice")
 
 
 def _default_user_config():
-    """Backward compat: return first user config"""
+    """Backward compat: return first user config
+    向后兼容：返回第一个用户配置
+    """
     if _users:
         return next(iter(_users.values()))
     return {"owner_id": "", "workspace": "", "model": _config.get("default", "")}
 
 
 def init(models_config, users, sessions_dir):
+    """初始化 LLM 模块
+    Initialize LLM module
+    """
     global _config, _users, _sessions_dir
     _config = models_config
     _users = users
@@ -50,17 +61,21 @@ def init(models_config, users, sessions_dir):
 
 
 # ============================================================
-#  LLM API Calls
+#  LLM API Calls - LLM API 调用
 # ============================================================
 
 def _get_provider(name=None):
-    """Get LLM provider. name=None returns default."""
+    """Get LLM provider. name=None returns default.
+    获取 LLM 提供商。name=None 返回默认提供商。
+    """
     provider_name = name or _config["default"]
     return _config["providers"][provider_name]
 
 
 def _likely_needs_tools(message):
-    """Keyword heuristic: determine if message likely needs tool calls."""
+    """Keyword heuristic: determine if message likely needs tool calls.
+    关键词启发式：判断消息是否可能需要工具调用。
+    """
     tool_keywords = [
         "search", "look_up", "check", "find_for_me", "baidu",
         "weather", "temperature", "rain", "snow",
@@ -76,7 +91,9 @@ def _likely_needs_tools(message):
 
 
 def _select_model(message, session_key):
-    """Voice always uses voice_default (minimax-highspeed), chat/scheduler always uses kimi-k2.5."""
+    """Voice always uses voice_default (minimax-highspeed), chat/scheduler always uses kimi-k2.5.
+    语音会话始终使用 voice_default (minimax-highspeed)，聊天/调度器始终使用 kimi-k2.5。
+    """
     if not _is_voice_session(session_key):
         return _config["default"]  # kimi-k2.5
 
@@ -87,6 +104,9 @@ def _select_model(message, session_key):
 
 
 def _call_llm(messages, tool_defs, provider=None):
+    """调用 LLM API
+    Call LLM API
+    """
     provider = provider or _get_provider()
     url = provider["api_base"].rstrip("/") + "/chat/completions"
 
@@ -108,6 +128,7 @@ def _call_llm(messages, tool_defs, provider=None):
     timeout = provider.get("timeout", 120)
 
     # 429 retry: max 4 attempts, exponential backoff, prevent rate limit from crashing entire chat loop
+    # 429 重试：最多 4 次，指数退避，防止速率限制导致整个聊天循环崩溃
     max_retries = 4
     backoff_delays = [3, 6, 12, 24]
 
@@ -124,6 +145,7 @@ def _call_llm(messages, tool_defs, provider=None):
                 pass
 
             # Only retry on 429, throw on other errors
+            # 仅在 429 时重试，其他错误直接抛出
             if e.code == 429 and attempt < max_retries:
                 delay = backoff_delays[attempt]
                 log.warning("[llm] HTTP 429 rate limit, retry %d/%d after %ds: %s",
@@ -137,20 +159,29 @@ def _call_llm(messages, tool_defs, provider=None):
 
 
 # ============================================================
-#  Session Management
+#  Session Management - 会话管理
 # ============================================================
 
 def _session_path(session_key):
+    """生成会话文件路径
+    Generate session file path
+    """
     safe = session_key.replace("/", "_").replace(":", "_").replace("\\", "_")
     return os.path.join(_sessions_dir, f"{safe}.json")
 
 
 def _load_session(session_key, user_id=None):
+    """加载会话历史
+    Load session history
+    """
     path = _session_path(session_key)
     if os.path.exists(path):
         # PR 3.1: auto-archive and reset when scheduler session is too large
         # Only for scheduler sessions (long-term accumulation, 200 msg limit)
         # DM sessions not archived (natural MAX_SESSION_MESSAGES=40 limit, tool results are large but truncated)
+        # PR 3.1：调度器会话过大时自动归档并重置
+        # 仅针对调度器会话（长期积累，200 条消息限制）
+        # 私聊会话不归档（自然 MAX_SESSION_MESSAGES=40 限制，工具结果虽大但会截断）
         if session_key.startswith("scheduler"):
             try:
                 fsize = os.path.getsize(path)
@@ -174,6 +205,7 @@ def _load_session(session_key, user_id=None):
                 evicted = messages[:-MAX_SESSION_MESSAGES]
                 messages = messages[-MAX_SESSION_MESSAGES:]
                 # Compress evicted messages into long-term memory (same logic as _save_session)
+                # 将被淘汰的消息压缩到长期记忆（与_save_session 相同逻辑）
                 try:
                     import memory as mem_mod
                     mem_mod.compress_async(evicted, session_key, user_id=user_id)
@@ -182,6 +214,9 @@ def _load_session(session_key, user_id=None):
             # After truncation, may start with orphan tool messages (no matching assistant + tool_calls),
             # or assistant with tool_calls but subsequent tool results truncated.
             # kimi-k2.5 requires valid message sequence, else 400. Skip to first user message.
+            # 截断后可能以孤立工具消息开始（无匹配的 assistant + tool_calls），
+            # 或 assistant 有 tool_calls 但后续工具结果被截断。
+            # kimi-k2.5 需要有效的消息序列，否则返回 400。跳过到第一条用户消息。
             while messages and messages[0].get("role") not in ("user", "system"):
                 messages.pop(0)
             return messages
@@ -192,14 +227,18 @@ def _load_session(session_key, user_id=None):
 
 def _strip_images_for_storage(messages):
     """Before saving session, replace image_url in multimodal content with [image] text marker.
+    保存会话前，将多模态内容中的 image_url 替换为 [image] 文本标记。
 
     Reason: kimi-k2.5 rejects image_url format in history messages, returns 400.
+    原因：kimi-k2.5 拒绝历史消息中的 image_url 格式，返回 400。
     Images only need to be sent in current turn, text markers suffice in history.
+    图片只需在当前轮次发送，历史中用文本标记即可。
     """
     cleaned = []
     for msg in messages:
         if msg.get("role") == "user" and isinstance(msg.get("content"), list):
             # Multimodal content -> extract text, replace images with markers
+            # 多模态内容 -> 提取文本，用标记替换图片
             text_parts = []
             for item in msg["content"]:
                 if item.get("type") == "text":
@@ -213,11 +252,15 @@ def _strip_images_for_storage(messages):
 
 
 def _save_session(session_key, messages, user_id=None):
+    """保存会话历史
+    Save session history
+    """
     limit = MAX_SCHEDULER_MESSAGES if session_key.startswith("scheduler") else MAX_SESSION_MESSAGES
     if len(messages) > limit:
         evicted = messages[:-limit]
         messages = messages[-limit:]
         # Hook 2: async compress evicted messages into long-term memory
+        # Hook 2：异步将被淘汰的消息压缩到长期记忆
         try:
             import memory as mem_mod
             mem_mod.compress_async(evicted, session_key, user_id=user_id)
@@ -240,15 +283,17 @@ def _save_session(session_key, messages, user_id=None):
 
 
 def _serialize_assistant_msg(msg_data):
-    """Serialize assistant message. Preserve reasoning_content (kimi-k2.5 compat)."""
+    """Serialize assistant message. Preserve reasoning_content (kimi-k2.5 compat).
+    序列化 assistant 消息。保留 reasoning_content（kimi-k2.5 兼容）。
+    """
     result = {"role": "assistant"}
     result["content"] = msg_data.get("content") or None
 
-    reasoning = msg_data.get("reasoning_content")
+    reasoning = msg_data.get("reasoning_content")  # 推理内容 (reasoning content)
     if reasoning:
         result["reasoning_content"] = reasoning
 
-    tool_calls = msg_data.get("tool_calls")
+    tool_calls = msg_data.get("tool_calls")  # 工具调用 (tool calls)
     if tool_calls:
         if "reasoning_content" not in result:
             result["reasoning_content"] = "ok"
@@ -267,13 +312,15 @@ def _serialize_assistant_msg(msg_data):
 
 
 # ============================================================
-#  Multimodal Message Building
+#  Multimodal Message Building - 多模态消息构建
 # ============================================================
 
-_IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5MB (图片最大 5MB)
 
 def _image_to_base64_url(image_path):
-    """Read image file, return data URI. Returns None if over 5MB."""
+    """Read image file, return data URI. Returns None if over 5MB.
+    读取图片文件，返回 data URI。超过 5MB 返回 None。
+    """
     file_size = os.path.getsize(image_path)
     if file_size > _IMAGE_MAX_BYTES:
         log.warning("[vision] image too large: %s (%.1fMB > 5MB)", image_path, file_size / 1024 / 1024)
@@ -288,7 +335,9 @@ def _image_to_base64_url(image_path):
 
 
 def _build_user_message(text, images=None):
-    """Build user message, supports plain text or multimodal (text+images)"""
+    """Build user message, supports plain text or multimodal (text+images)
+    构建用户消息，支持纯文本或多模态（文本 + 图片）
+    """
     if not images:
         return {"role": "user", "content": text}
 
@@ -446,13 +495,17 @@ When details are needed, use tools first, then answer in one spoken sentence."""
 
 
 def _build_system_prompt(session_key: str = "", workspace: str = ""):
+    """构建系统提示词
+    Build system prompt
+    """
     ws = workspace or _default_user_config().get("workspace", "")
     if _is_voice_session(session_key):
         return _build_voice_prompt(ws)
     now_str = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S CST")
-    is_scheduler = session_key.startswith("scheduler")
+    is_scheduler = session_key.startswith("scheduler")  # 是否为调度器会话
 
     # --- Tier 1: Identity (always included) ---
+    # --- 第一层：身份（始终包含）---
     identity = ("You are the 7x24 office AI assistant, managing the office to empower the user.\n"
                 "Your name and personality are in SOUL.md, user info is in USER.md.\n"
                 "Current Beijing Time: " + now_str + "\n\n"
