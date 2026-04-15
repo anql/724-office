@@ -1,14 +1,15 @@
 """
-AI Assistant — Entry Point
+AI 助手 - 入口文件 (Entry Point)
 
-Start HTTP server, receive messaging platform callbacks, invoke tool use loop.
-Module structure:
-  xiaowang.py  — Entry: config, HTTP, callbacks, debounce (this file)
-  llm.py       — LLM calls + tool use loop + session management
-  tools.py     — Tool registry (add tools here only)
-  messaging.py      — Messaging API wrapper (text/image/file/video/link/CDN)
-  scheduler.py — Built-in scheduler (one-shot + cron)
+启动 HTTP 服务器，接收消息平台回调，调用工具使用循环。
+模块结构:
+  xiaowang.py  — 入口：配置、HTTP 服务器、回调处理、消息去重（本文件）
+  llm.py       — LLM 调用 + 工具使用循环 + 会话管理
+  tools.py     — 工具注册表（只在这里添加工具）
+  messaging.py — 消息 API 封装（文本/图片/文件/视频/链接/CDN）
+  scheduler.py — 内置调度器（一次性任务 + 定时任务）
 
+使用方法：python3 xiaowang.py
 Usage: python3 xiaowang.py
 """
 
@@ -29,99 +30,151 @@ import websocket
 import ssl
 
 # ============================================================
-#  Configuration
+#  配置部分 (Configuration)
 # ============================================================
 
+# 数据目录：从环境变量读取，默认为当前文件所在目录
+# Data directory: read from environment variable, default to current file's directory
 DATA_DIR = os.environ.get("AGENT_DATA", os.path.dirname(os.path.abspath(__file__)))
+# 配置文件路径：从环境变量读取，默认为数据目录下的 config.json
+# Config file path: read from environment variable, default to config.json under data directory
 CONFIG_PATH = os.environ.get("AGENT_CONFIG", os.path.join(DATA_DIR, "config.json"))
 
+# 加载配置文件
+# Load configuration file
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
-# Multi-tenant: build USERS routing table
+# 多租户支持：构建 USERS 路由表
+# Multi-tenant support: build USERS routing table
+# 每个用户有独立的工作空间和模型配置
+# Each user has independent workspace and model configuration
 USERS = {}
 for _uid, _ucfg in CONFIG.get("users", {}).items():
+    # 用户工作空间路径，默认为 ./users/{用户 ID}
+    # User workspace path, default to ./users/{user ID}
     _ws = os.path.abspath(_ucfg.get("workspace", f"./users/{_uid}"))
     os.makedirs(_ws, exist_ok=True)
     USERS[str(_uid)] = {
-        "owner_id": str(_uid),
-        "name": _ucfg.get("name", "user"),
-        "workspace": _ws,
-        "model": _ucfg.get("model", CONFIG["models"]["default"]),
+        "owner_id": str(_uid),           # 用户 ID (User ID)
+        "name": _ucfg.get("name", "user"),  # 用户名称 (User name)
+        "workspace": _ws,                   # 工作空间路径 (Workspace path)
+        "model": _ucfg.get("model", CONFIG["models"]["default"]),  # 使用的模型 (Model to use)
     }
+# 主工作空间路径
+# Main workspace path
 WORKSPACE = os.path.abspath(CONFIG.get("workspace", "./workspace"))
-# Backward compatibility with owner_ids
+# 向后兼容：支持旧的 owner_ids 配置格式
+# Backward compatibility: support old owner_ids config format
 for _oid in CONFIG.get("owner_ids", []):
     _sid = str(_oid)
     if _sid not in USERS:
         USERS[_sid] = {"owner_id": _sid, "name": "owner", "workspace": WORKSPACE, "model": CONFIG["models"]["default"]}
+# HTTP 服务器端口，默认 8080
+# HTTP server port, default 8080
 PORT = CONFIG.get("port", 8080)
+# 消息去重时间窗口（秒），用于合并短时间内连续发送的消息
+# Message debounce time window (seconds), used to merge continuously sent messages in short time
 DEBOUNCE_SECONDS = CONFIG.get("debounce_seconds", 1.5)
+# 会话存储目录
+# Session storage directory
 SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
+# 定时任务存储文件
+# Scheduled task storage file
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
-# Docker single-tenant: use first user workspace/files as default files dir
+# Docker 单租户模式：使用第一个用户的工作空间作为默认文件目录
+# Docker single-tenant mode: use first user's workspace as default file directory
 _first_user_ws = next(iter(USERS.values()))["workspace"] if USERS else WORKSPACE
 FILES_DIR = os.path.join(_first_user_ws, "files")
 
+# 创建必要的目录
+# Create necessary directories
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(FILES_DIR, exist_ok=True)
 
+# 配置日志系统：时间戳 + 日志级别 + 消息
+# Configure logging system: timestamp + log level + message
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("agent")
 
 # ============================================================
-#  Module Initialization
+#  模块初始化 (Module Initialization)
 # ============================================================
 
-import messaging
-import llm
-import scheduler
+# 导入核心模块
+# Import core modules
+import messaging  # 消息平台 API 封装 (Messaging platform API wrapper)
+import llm        # LLM 调用和工具使用循环 (LLM invocation and tool use loop)
+import scheduler  # 定时任务调度器 (Scheduled task scheduler)
 
 # ============================================================
-#  Group Chat Support — Name Cache + Helpers
+#  群聊支持 - 名称缓存 + 辅助函数 (Group Chat Support - Name Cache + Helper Functions)
 # ============================================================
 
-_name_cache = {}  # sender_id -> (name, timestamp)
+# 发送者名称缓存：sender_id -> (名称，时间戳)
+# Sender name cache: sender_id -> (name, timestamp)
+# 避免频繁调用 API 查询联系人信息
+# Avoid frequent API calls to query contact information
+_name_cache = {}
 
-# Group chat context buffer: non-@ messages stored silently, injected into LLM context when @-mentioned
+# 群聊上下文缓冲区：存储未 @ 机器人的消息，供 LLM 参考
+# Group chat context buffer: store messages not @-mentioning the bot, for LLM reference
+# 结构：group_id -> deque（双端队列，自动限制最大长度）
+# Structure: group_id -> deque (double-ended queue, automatically limits max length)
 from collections import deque
-_group_context_buffers = {}  # group_id -> deque
-GROUP_CONTEXT_MAX = 20
+_group_context_buffers = {}  # 群 ID -> 消息队列 (Group ID -> Message queue)
+GROUP_CONTEXT_MAX = 20  # 每个群最多保留 20 条上下文消息 (Max 20 context messages per group)
 
 
 def _format_group_context(group_id):
-    """Format group chat context buffer for LLM reference"""
+    """格式化群聊上下文缓冲区，供 LLM 参考
+    Format group chat context buffer for LLM reference
+    """
     buf = _group_context_buffers.get(group_id, [])
     if not buf:
         return ""
-    lines = ["[Recent group messages (not @-mentioning you, for context only)]"]
+    lines = ["[最近的群消息（未@你，仅供参考）]"]
     for item in buf:
         lines.append("[%s] %s" % (item["sender"], item["text"]))
     return "\n".join(lines)
 
 
 def _resolve_sender_name(sender_id):
-    """Query sender nickname with 1-hour cache"""
+    """查询发送者昵称，带 1 小时缓存
+    Query sender nickname, with 1-hour cache
+    """
+    # 检查缓存是否有效（1 小时内）
+    # Check if cache is valid (within 1 hour)
     cached = _name_cache.get(sender_id)
     if cached and time.time() - cached[1] < 3600:
         return cached[0]
+    # 调用消息 API 查询联系人信息
+    # Call messaging API to query contact information
     try:
         info = messaging.get_contact_info([sender_id])
         if info:
+            # 优先使用昵称，其次备注名
+            # Prefer nickname, then remark name
             name = info[0].get("nickname") or info[0].get("remark") or ""
             if name:
                 _name_cache[sender_id] = (name, time.time())
                 return name
     except Exception:
         pass
+    # 降级方案：使用用户 ID 后 6 位
+    # Fallback: use last 6 digits of user ID
     fallback = "user%s" % str(sender_id)[-6:]
     _name_cache[sender_id] = (fallback, time.time())
     return fallback
 
 
 def _strip_at_mention(content):
-    """Strip @xxx mention text from message start"""
+    """从消息开头移除 @xxx 提及文本
+    Remove @xxx mention text from the beginning of message
+    """
     import re as _re2
+    # 使用正则表达式移除开头的 @ 提及
+    # Use regex to remove @ mention from the beginning
     return _re2.sub(r'^@\S+\s*', '', content).strip()
 
 messaging.init(CONFIG["messaging"])
@@ -132,19 +185,23 @@ import tools
 tools.init_extra(CONFIG)
 
 # Initialize memory system
+# 初始化内存系统
 import memory as mem_mod
 _mem_db = os.path.join(DATA_DIR, 'memory_db')
 os.makedirs(_mem_db, exist_ok=True)
 mem_mod.init(CONFIG, CONFIG.get('models', {}), _mem_db)
 
 # ============================================================
-#  Persistent File Storage
+#  持久化文件存储 (Persistent File Storage)
 # ============================================================
 
 FILES_INDEX = os.path.join(FILES_DIR, "index.json")
 
 
 def _load_files_index():
+    """加载文件索引
+    Load file index
+    """
     if os.path.exists(FILES_INDEX):
         try:
             with open(FILES_INDEX, "r", encoding="utf-8") as f:
@@ -155,35 +212,44 @@ def _load_files_index():
 
 
 def _save_files_index(index):
+    """保存文件索引
+    Save file index
+    """
     with open(FILES_INDEX, "w", encoding="utf-8") as f:
         json.dump(index, f, ensure_ascii=False, indent=2)
 
 
 def save_media_file(tmp_path, media_type, filename="", files_dir=None):
-    """Move temp file to persistent storage, return persistent path"""
+    """Move temp file to persistent storage, return persistent path
+    移动临时文件到持久化存储，返回持久化路径
+    """
     from datetime import datetime, timezone, timedelta
-    CST = timezone(timedelta(hours=8))
+    CST = timezone(timedelta(hours=8))  # 中国标准时间 (China Standard Time)
     now = datetime.now(CST)
     _fdir = files_dir or FILES_DIR
-    month_dir = os.path.join(_fdir, now.strftime("%Y-%m"))
+    month_dir = os.path.join(_fdir, now.strftime("%Y-%m"))  # 按年月组织文件 (Organize files by year-month)
     os.makedirs(month_dir, exist_ok=True)
 
+    # 获取文件扩展名 (Get file extension)
     ext = os.path.splitext(tmp_path)[1] or os.path.splitext(filename)[1] if filename else ".bin"
     if not ext:
         ext = ".bin"
+    # 安全文件名：替换路径分隔符 (Safe filename: replace path separators)
     safe_name = filename.replace("/", "_").replace("\\", "_") if filename else ""
     import random as _rnd
-    _ts_ms = int(now.timestamp() * 1000)
-    _rand = '%04x' % _rnd.randint(0, 0xFFFF)
+    _ts_ms = int(now.timestamp() * 1000)  # 时间戳毫秒 (Timestamp in milliseconds)
+    _rand = '%04x' % _rnd.randint(0, 0xFFFF)  # 随机数防止重名 (Random number to prevent name collision)
     stored_name = f"{_ts_ms}_{_rand}_{safe_name}" if safe_name else f"{_ts_ms}_{_rand}{ext}"
     dest = os.path.join(month_dir, stored_name)
 
+    # 移动文件到持久化存储 (Move file to persistent storage)
     try:
         os.rename(tmp_path, dest)
     except OSError:
         import shutil
         shutil.move(tmp_path, dest)
 
+    # 记录文件索引 (Record file index)
     entry = {
         "path": dest,
         "type": media_type,
@@ -198,19 +264,22 @@ def save_media_file(tmp_path, media_type, filename="", files_dir=None):
     return dest
 
 # ============================================================
-#  ASR (WebSocket Streaming Recognition)
+#  ASR (WebSocket Streaming Recognition) - 语音识别
 # ============================================================
 
-XFYUN_CONFIG = CONFIG.get("xfyun", {})
+XFYUN_CONFIG = CONFIG.get("xfyun", {})  # 讯飞语音配置 (iFlytek voice configuration)
 
 
 def xfyun_asr(audio_path):
-    """WebSocket ASR: audio file -> text"""
+    """WebSocket ASR: audio file -> text
+    WebSocket 自动语音识别：音频文件转文本
+    """
     if not XFYUN_CONFIG:
         return None
     _asr_start = time.time()
 
     # Transcode to PCM: silk via pilk, other formats via ffmpeg
+    # 转码为 PCM 格式：silk 格式用 pilk，其他格式用 ffmpeg
     pcm_path = audio_path + ".pcm"
     try:
         with open(audio_path, "rb") as f:
@@ -233,16 +302,18 @@ def xfyun_asr(audio_path):
         log.error("[asr] transcode produced empty PCM")
         return None
 
+    # 读取 PCM 音频数据 (Read PCM audio data)
     try:
         with open(pcm_path, "rb") as f:
             audio_data = f.read()
     finally:
         try:
-            os.unlink(pcm_path)
+            os.unlink(pcm_path)  # 删除临时 PCM 文件 (Delete temporary PCM file)
         except Exception:
             pass
 
     # Build authentication URL
+    # 构建认证 URL (Build authentication URL)
     from datetime import datetime
     from urllib.parse import urlencode
     import email.utils
@@ -255,6 +326,7 @@ def xfyun_asr(audio_path):
     now = datetime.utcnow()
     date = email.utils.formatdate(timeval=time.mktime(now.timetuple()), usegmt=True)
 
+    # HMAC-SHA256 签名 (HMAC-SHA256 signature)
     signature_origin = f"host: iat-api.xfyun.cn\ndate: {date}\nGET /v2/iat HTTP/1.1"
     signature_sha = hmac.new(api_secret.encode(), signature_origin.encode(), hashlib.sha256).digest()
     signature = base64.b64encode(signature_sha).decode()
@@ -268,11 +340,15 @@ def xfyun_asr(audio_path):
     ws_url = url + "?" + urlencode({"authorization": authorization, "date": date, "host": "iat-api.xfyun.cn"})
 
     # WebSocket synchronous call
+    # WebSocket 同步调用 (WebSocket synchronous call)
     result_text = []
     done_event = threading.Event()
     error_holder = [None]
 
     def on_message(ws, message):
+        """处理 WebSocket 消息回调
+        Handle WebSocket message callback
+        """
         try:
             data = json.loads(message)
             code = data.get("code", 0)
@@ -285,20 +361,26 @@ def xfyun_asr(audio_path):
             for ws_item in ws_list:
                 for cw in ws_item.get("cw", []):
                     result_text.append(cw.get("w", ""))
-            if data.get("data", {}).get("status") == 2:
+            if data.get("data", {}).get("status") == 2:  # 识别完成 (Recognition complete)
                 done_event.set()
         except Exception as e:
             error_holder[0] = str(e)
             done_event.set()
 
     def on_error(ws, error):
+        """处理 WebSocket 错误回调
+        Handle WebSocket error callback
+        """
         error_holder[0] = str(error)
         done_event.set()
 
     def on_open(ws):
+        """WebSocket 连接打开后发送音频数据
+        Send audio data after WebSocket connection opens
+        """
         def send_audio():
-            frame_size = 8000  # bytes per frame
-            status = 0  # 0=first, 1=continue, 2=last
+            frame_size = 8000  # bytes per frame (每帧字节数)
+            status = 0  # 0=first (首帧), 1=continue (中间帧), 2=last (末帧)
             offset = 0
             while offset < len(audio_data):
                 end = min(offset + frame_size, len(audio_data))
@@ -321,7 +403,7 @@ def xfyun_asr(audio_path):
                         "audio": base64.b64encode(chunk).decode(),
                     },
                 }
-                # Remove None values
+                # Remove None values (移除空值)
                 d = {k: v for k, v in d.items() if v is not None}
                 ws.send(json.dumps(d))
 
@@ -329,7 +411,7 @@ def xfyun_asr(audio_path):
                     status = 1
                 offset = end
                 if status != 2:
-                    time.sleep(0.04)  # Simulate real-time
+                    time.sleep(0.04)  # Simulate real-time (模拟实时传输)
         threading.Thread(target=send_audio, daemon=True).start()
 
     ws = websocket.WebSocketApp(
@@ -340,7 +422,7 @@ def xfyun_asr(audio_path):
     )
     wst = threading.Thread(target=lambda: ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}), daemon=True)
     wst.start()
-    done_event.wait(timeout=15)
+    done_event.wait(timeout=15)  # 等待识别完成，最多 15 秒 (Wait for recognition, max 15 seconds)
     ws.close()
 
     if error_holder[0]:
@@ -358,10 +440,13 @@ def xfyun_asr(audio_path):
 
 
 # ============================================================
-#  Message Splitting
+#  Message Splitting - 消息分割
 # ============================================================
 
 def split_message(text, max_bytes=1800):
+    """分割长消息，避免超过平台限制
+    Split long messages to avoid exceeding platform limits
+    """
     if len(text.encode("utf-8")) <= max_bytes:
         return [text]
     chunks, current = [], ""
@@ -378,22 +463,30 @@ def split_message(text, max_bytes=1800):
     return chunks
 
 # ============================================================
-#  Debounce
+#  Debounce - 消息去重
 # ============================================================
 
-_debounce_buffers = {}   # sender_id -> [{"text": str, "images": [path, ...]}]
+# 去重缓冲区：sender_id -> [{"text": str, "images": [path, ...]}]
+# Debounce buffer: sender_id -> [{"text": str, "images": [path, ...]}]
+_debounce_buffers = {}
 _debounce_timers = {}
-_debounce_pending = {}   # sender_id -> int (pending download count)
-_debounce_pending_since = {}  # sender_id -> timestamp (first pending registered)
+# 待处理下载计数：sender_id -> int (pending download count)
+_debounce_pending = {}
+# 待处理开始时间：sender_id -> timestamp (first pending registered)
+_debounce_pending_since = {}
 _debounce_lock = threading.Lock()
-_PENDING_MAX_WAIT = 30  # Max wait 30s for download, force flush on timeout
+_PENDING_MAX_WAIT = 30  # Max wait 30s for download, force flush on timeout (下载最大等待 30 秒，超时强制刷新)
 
 
 def _debounce_flush(sender_id):
+    """刷新去重缓冲区，发送合并后的消息
+    Flush debounce buffer, send merged messages
+    """
     with _debounce_lock:
         pending = _debounce_pending.get(sender_id, 0)
         if pending > 0:
             # Check if max wait time exceeded
+            # 检查是否超过最大等待时间 (Check if max wait time exceeded)
             since = _debounce_pending_since.get(sender_id, time.time())
             waited = time.time() - since
             if waited < _PENDING_MAX_WAIT:
@@ -406,6 +499,7 @@ def _debounce_flush(sender_id):
             else:
                 log.warning(f"[debounce] {sender_id}: force flush after {waited:.0f}s, {pending} downloads still pending")
 
+        # 弹出缓冲区数据 (Pop buffer data)
         fragments = _debounce_buffers.pop(sender_id, [])
         _debounce_timers.pop(sender_id, None)
         _debounce_pending.pop(sender_id, None)
@@ -415,6 +509,7 @@ def _debounce_flush(sender_id):
         return
 
     # Merge text and images
+    # 合并文本和图片 (Merge text and images)
     texts = []
     images = []
     for frag in fragments:
@@ -427,10 +522,12 @@ def _debounce_flush(sender_id):
 
     combined_text = "\n".join(texts)
     # Diagnostic log: record merged fragment count and content preview
+    # 诊断日志：记录合并的片段数量和内容预览 (Diagnostic log: record merged fragment count and content preview)
     preview = combined_text[:80].replace("\n", " ")
     log.info(f"[debounce] flush {sender_id}: {len(fragments)} fragments, images={len(images)}, preview=\"{preview}\"")
 
     # Detect if group chat
+    # 检测是否为群聊 (Detect if group chat)
     group_ctx = None
     for frag in fragments:
         if isinstance(frag, dict) and frag.get("group_ctx"):
@@ -439,6 +536,7 @@ def _debounce_flush(sender_id):
 
     if group_ctx:
         # ===== Group chat path =====
+        # ===== 群聊处理路径 =====
         group_id = group_ctx["group_id"]
         session_key = "wecom_group_%s" % group_id
         user_config = next(iter(USERS.values()), None)
@@ -457,6 +555,7 @@ def _debounce_flush(sender_id):
         return
 
     # ===== Direct message path (original logic unchanged) =====
+    # ===== 私聊处理路径（原始逻辑保持不变）=====
     try:
         user_config = USERS.get(str(sender_id))
         if not user_config:
@@ -464,6 +563,7 @@ def _debounce_flush(sender_id):
             return
 
         # === Record user activity timestamp (for scheduler inactivity guard) ===
+        # === 记录用户活动时间戳（用于调度器不活动监控）===
         try:
             activity_file = os.path.join(user_config.get("workspace", ""), ".last_user_message")
             with open(activity_file, "w") as f:
@@ -472,6 +572,7 @@ def _debounce_flush(sender_id):
             pass
 
         # === Dormant recovery: user came back, remove dormant marker ===
+        # === 休眠恢复：用户回来了，移除休眠标记 ===
         dormant_file = os.path.join(user_config.get("workspace", ""), ".dormant_since")
         if os.path.exists(dormant_file):
             try:
@@ -489,9 +590,13 @@ def _debounce_flush(sender_id):
             return
 
         # Pre-send buffer check: did new messages arrive during LLM processing?
+        # 发送前缓冲区检查：LLM 处理期间是否有新消息到达？
         # Note: no longer discarding current reply. Side effects during LLM processing (write_file/schedule) already executed,
         # Discarding reply would hide results from user while state has changed.
         # New messages will be handled naturally by the debounce timer.
+        # 注意：不再丢弃当前回复。LLM 处理期间的副作用（写文件/调度）已执行，
+        # 丢弃回复会向用户隐藏结果而状态已改变。
+        # 新消息将由去重定时器自然处理。
         with _debounce_lock:
             new_fragments = _debounce_buffers.get(sender_id, [])
             has_new = len(new_fragments) > 0
@@ -503,7 +608,7 @@ def _debounce_flush(sender_id):
         for i, chunk in enumerate(_split_message(_strip_markdown(reply), 1800)):
             messaging.send_text(sender_id, chunk)
             if i > 0:
-                time.sleep(0.5)
+                time.sleep(0.5)  # 分条发送时添加延迟 (Add delay when sending in chunks)
 
     except Exception as e:
         log.error(f"[flush] error for {sender_id}: {e}", exc_info=True)
@@ -514,6 +619,9 @@ def _debounce_flush(sender_id):
 
 
 def debounce_message(sender_id, text, images=None, group_ctx=None):
+    """将消息加入去重缓冲区
+    Add message to debounce buffer
+    """
     with _debounce_lock:
         frag = {"text": text, "images": images or []}
         if group_ctx:
@@ -531,12 +639,14 @@ def debounce_message(sender_id, text, images=None, group_ctx=None):
 
 
 def _register_pending(sender_id):
-    """Register a pending download. Reset debounce timer, flush waits for all pending."""
+    """Register a pending download. Reset debounce timer, flush waits for all pending.
+    注册待处理下载。重置去重定时器，刷新等待所有待处理完成。
+    """
     with _debounce_lock:
         _debounce_pending[sender_id] = _debounce_pending.get(sender_id, 0) + 1
         if sender_id not in _debounce_pending_since:
             _debounce_pending_since[sender_id] = time.time()
-        # Reset timer
+        # Reset timer (重置定时器)
         old_timer = _debounce_timers.get(sender_id)
         if old_timer:
             old_timer.cancel()
@@ -549,12 +659,15 @@ def _register_pending(sender_id):
 
 
 def _resolve_pending(sender_id, text, images=None):
-    """After download: add result to buffer, decrement pending count, reset timer."""
+    """After download: add result to buffer, decrement pending count, reset timer.
+    下载完成后：将结果添加到缓冲区，减少待处理计数，重置定时器。
+    """
     with _debounce_lock:
         _debounce_pending[sender_id] = max(0, _debounce_pending.get(sender_id, 0) - 1)
         frag = {"text": text, "images": images or []}
         _debounce_buffers.setdefault(sender_id, []).append(frag)
         # Reset timer(shorter delay after download, faster response)
+        # 重置定时器（下载后更短延迟，更快响应）
         old_timer = _debounce_timers.get(sender_id)
         if old_timer:
             old_timer.cancel()
@@ -568,18 +681,21 @@ def _resolve_pending(sender_id, text, images=None):
     log.info(f"[debounce] {sender_id}: resolved pending, buffered #{count} (remaining pending: {pending}, flush_delay={flush_delay}s)")
 
 # ============================================================
-#  Callback Processing
+#  Callback Processing - 回调处理
 # ============================================================
 
 def _download_media(msg_data, media_type="file"):
     """Download media file, return local path or None
+    下载媒体文件，返回本地路径或 None
 
     Three download paths (by priority):
-    1. Has fileId -> /cloud/wxWorkDownload (work messaging format)
-    2. Has fileAuthKey -> /cloud/wxDownload (personal format, images often use this)
-    3. Has fileHttpUrl -> direct HTTP download (fallback)
+    三种下载路径（按优先级）:
+    1. Has fileId -> /cloud/wxWorkDownload (work messaging format) (企业微信格式)
+    2. Has fileAuthKey -> /cloud/wxDownload (personal format, images often use this) (个人格式，图片常用)
+    3. Has fileHttpUrl -> direct HTTP download (fallback) (直接 HTTP 下载，备用)
 
     media_type used to infer messaging platform fileType: image=1 video=4 voice/file=5
+    media_type 用于推断消息平台 fileType: image=1 video=4 voice/file=5
     """
     file_id = msg_data.get("fileId", "")
     file_aes_key = msg_data.get("fileAeskey", msg_data.get("fileAesKey", ""))
@@ -587,10 +703,12 @@ def _download_media(msg_data, media_type="file"):
     file_size = msg_data.get("fileSize", msg_data.get("fileBigSize", 0))
 
     # Infer messaging platform fileType
+    # 推断消息平台 fileType
     ft_map = {"image": 1, "GIF": 1, "video_kw": 4, "voice": 5, "file": 5}
     file_type = ft_map.get(media_type, 5)
 
     # Path 1: work messaging format (has fileId)
+    # 路径 1：企业微信格式（有 fileId）
     if file_id and file_aes_key:
         log.info(f"[media] trying wxWorkDownload (fileId={file_id[:20]}..., fileType={file_type})")
         path = messaging.download_wx_work(file_id, file_aes_key, file_size, file_type=file_type)
@@ -598,6 +716,7 @@ def _download_media(msg_data, media_type="file"):
             return path
 
     # Path 2: personal format (has fileAuthKey + URL)
+    # 路径 2：个人微信格式（有 fileAuthKey + URL）
     if file_auth_key:
         file_url = (msg_data.get("fileBigHttpUrl") or msg_data.get("fileMiddleHttpUrl") or
                     msg_data.get("fileThumbHttpUrl") or msg_data.get("fileHttpUrl") or "")
@@ -608,6 +727,7 @@ def _download_media(msg_data, media_type="file"):
                 return path
 
     # Path 3: direct HTTP download (fallback)
+    # 路径 3：直接 HTTP 下载（备用方案）
     direct_url = (msg_data.get("fileHttpUrl") or msg_data.get("fileUrl") or "")
     if direct_url:
         log.info(f"[media] trying direct HTTP download")
@@ -624,12 +744,15 @@ def _download_media(msg_data, media_type="file"):
 
 
 def _handle_media_message(sender_id, msg_data, media_type, filename=""):
-    """Handle received multimedia message: register pending immediately, async download, persist, notify LLM"""
+    """Handle received multimedia message: register pending immediately, async download, persist, notify LLM
+    处理收到的多媒体消息：立即注册待处理，异步下载，持久化，通知 LLM
+    """
     if str(sender_id) not in USERS:
         messaging.send_text(sender_id, "Sorry, you have not activated the AI assistant service.")
         return
 
     # Register pending immediately to prevent premature debounce flush
+    # 立即注册待处理以防止过早刷新去重缓冲区
     _register_pending(sender_id)
     threading.Thread(
         target=_async_media_download,
@@ -639,7 +762,9 @@ def _handle_media_message(sender_id, msg_data, media_type, filename=""):
 
 
 def _async_media_download(sender_id, msg_data, media_type, filename=""):
-    """Async download media file, resolve pending on completion"""
+    """Async download media file, resolve pending on completion
+    异步下载媒体文件，完成后解析待处理
+    """
     try:
         user_config = USERS[str(sender_id)]
         user_files_dir = os.path.join(user_config["workspace"], "files")
@@ -671,12 +796,15 @@ def _async_media_download(sender_id, msg_data, media_type, filename=""):
 
 
 def _handle_voice_message(sender_id, msg_data):
-    """Handle voice message: register pending immediately, async download + ASR"""
+    """Handle voice message: register pending immediately, async download + ASR
+    处理语音消息：立即注册待处理，异步下载 + ASR 语音识别
+    """
     if str(sender_id) not in USERS:
         messaging.send_text(sender_id, "Sorry, you have not activated the AI assistant service.")
         return
 
     # Register pending immediately to prevent premature debounce flush
+    # 立即注册待处理以防止过早刷新去重缓冲区
     _register_pending(sender_id)
     threading.Thread(
         target=_async_voice_process,
@@ -686,7 +814,9 @@ def _handle_voice_message(sender_id, msg_data):
 
 
 def _async_voice_process(sender_id, msg_data):
-    """Async download voice + ASR, resolve pending on completion"""
+    """Async download voice + ASR, resolve pending on completion
+    异步下载语音 + ASR 识别，完成后解析待处理
+    """
     try:
         user_config = USERS[str(sender_id)]
         user_files_dir = os.path.join(user_config["workspace"], "files")
@@ -704,6 +834,7 @@ def _async_voice_process(sender_id, msg_data):
             _resolve_pending(sender_id, f"[voice-to-text] {text}")
         else:
             # Immediately notify user voice was unclear
+            # 立即通知用户语音不清晰
             try:
                 messaging.send_text(sender_id, "Could not understand the voice message. Please try again or type it.")
             except Exception as e:
@@ -715,6 +846,9 @@ def _async_voice_process(sender_id, msg_data):
 
 
 def handle_callback(data):
+    """处理消息平台回调
+    Handle messaging platform callback
+    """
     if isinstance(data, dict) and "testMsg" in data:
         log.info(f"[callback] test: {data['testMsg']}")
         return
@@ -739,21 +873,26 @@ def handle_callback(data):
             msg_data = {}
 
         # Skip messages from self
+        # 跳过来自自己的消息
         if str(sender_id) == str(msg.get("userId")):
             continue
 
         # Group chat detection
+        # 群聊检测
         from_room_id = str(msg.get("fromRoomId", 0) or 0)
         is_group = from_room_id != "0"
 
         if is_group:
             # Gate 1: config opt-in
+            # 门控 1：配置启用检查
             if not CONFIG.get("group_chat", {}).get("enabled", False):
                 continue
             # Gate 2: only respond to @ mentions (non-empty atList = @-mentioned)
+            # 门控 2：仅响应@提及（atList 非空=被@）
             at_list = msg_data.get("atList", [])
             if not at_list:
                 # Non-@ message: silently store in context buffer
+                # 非@消息：静默存储到上下文缓冲区
                 if cmd == 15000 and msg_type in (0, 2, 1011):
                     msg_content = msg_data.get("content", "")
                     if msg_content:
@@ -764,6 +903,7 @@ def handle_callback(data):
                         log.info("[group] buffered context in room %s from %s", from_room_id, sender_name)
                 continue
             # Optional: exact match AI wechat_id
+            # 可选：精确匹配 AI 微信号
             ai_id = CONFIG.get("messaging", {}).get("wechat_id", "")
             if ai_id and not any(str(a.get("wxid", a.get("userId", ""))) == ai_id for a in at_list):
                 continue
@@ -905,22 +1045,31 @@ def handle_callback(data):
             log.info(f"[callback] account status: {msg_data.get('code', 0)}")
 
 # ============================================================
-#  HTTP Server
+#  HTTP Server - HTTP 服务器
 # ============================================================
 
 class Handler(BaseHTTPRequestHandler):
+    """HTTP 请求处理器
+    HTTP request handler
+    """
     def do_GET(self):
+        """处理 GET 请求 - 健康检查
+        Handle GET request - health check
+        """
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps({"status": "ok", "service": "agent"}).encode())
 
-    _MAX_BODY = 10 * 1024 * 1024  # 10MB
+    _MAX_BODY = 10 * 1024 * 1024  # 10MB (最大请求体 10MB)
 
     def do_POST(self):
+        """处理 POST 请求 - 消息回调
+        Handle POST request - message callback
+        """
         length = int(self.headers.get("Content-Length", 0))
         if length > self._MAX_BODY:
-            self.send_response(413)
+            self.send_response(413)  # Payload Too Large
             self.end_headers()
             return
         body = self.rfile.read(length)
@@ -929,7 +1078,7 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(body.decode("utf-8"))
         except Exception as e:
             log.error(f"[http] parse error: {e}")
-            self.send_response(400)
+            self.send_response(400)  # Bad Request
             self.end_headers()
             return
 
@@ -1007,10 +1156,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 # ============================================================
-#  Main
+#  Main - 主函数
 # ============================================================
 
 def main():
+    """主入口函数
+    Main entry function
+    """
     scheduler.start()
     log.info(f"[agent] starting on port {PORT}")
     log.info(f"[agent] workspace={WORKSPACE}")
@@ -1021,6 +1173,7 @@ def main():
         log.info(f"[agent] xfyun ASR enabled (app_id={XFYUN_CONFIG.get('app_id', '?')})")
 
     # ThreadingMixIn: each request in independent thread, prevents single connection from blocking
+    # ThreadingMixIn：每个请求在独立线程中，防止单个连接阻塞
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
 
