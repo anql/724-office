@@ -1,7 +1,9 @@
 """
 Tool Registry Base — registry, decorator, helpers
+工具注册表基类 — 注册表、装饰器、辅助函数
 
 All tool sub-modules import from here.
+所有工具子模块从这里导入。
 """
 
 import json
@@ -13,14 +15,16 @@ import random
 log = logging.getLogger("agent")
 
 # ============================================================
-#  Tool Registry
+#  Tool Registry - 工具注册表
 # ============================================================
 
-_registry = {}  # name -> {"fn", "definition"}
+_registry = {}  # name -> {"fn", "definition"} (工具名称 -> 函数和定义)
 
 
 def tool(name, description, properties, required=None):
-    """Decorator: register an LLM tool"""
+    """Decorator: register an LLM tool
+    装饰器：注册一个 LLM 工具
+    """
     def decorator(fn):
         _registry[name] = {
             "fn": fn,
@@ -42,15 +46,22 @@ def tool(name, description, properties, required=None):
 
 
 def get_definitions():
-    """Return all tool OpenAI function calling definitions"""
+    """Return all tool OpenAI function calling definitions
+    返回所有工具的 OpenAI 函数调用定义
+    """
     return [entry["definition"] for entry in _registry.values()]
 
 
 # Context profile — filter tools by session type to reduce token usage
+# 上下文配置 — 按会话类型过滤工具以减少 token 使用
 # voice: keep only core interaction tools (~15)
+# voice：仅保留核心交互工具（约 15 个）
 # scheduler: exclude scheduling tools to prevent circular creation (~25)
+# scheduler：排除调度工具防止循环创建（约 25 个）
 # group: exclude dangerous tools + admin tools (~20)
+# group：排除危险工具 + 管理工具（约 20 个）
 # default: full set (conservative start)
+# default：完整集合（保守开始）
 _TOOL_EXCLUDE_PROFILES = {
     "voice": {
         "trim_video", "add_bgm", "generate_video", "code_audit", "diagnose",
@@ -61,14 +72,14 @@ _TOOL_EXCLUDE_PROFILES = {
         "soul_report", "future_self",
     },
     "scheduler": {
-        "schedule", "list_schedules", "remove_schedule",  # Prevent circular creation
+        "schedule", "list_schedules", "remove_schedule",  # Prevent circular creation (防止循环创建)
         "trim_video", "add_bgm", "generate_video",
         "create_tool", "list_custom_tools", "remove_tool",
         "reload_mcp",
         "soul_report", "future_self",
     },
     "group": {
-        "exec", "edit_file",  # GROUP_RESTRICTED
+        "exec", "edit_file",  # GROUP_RESTRICTED (群聊受限)
         "code_audit", "diagnose", "self_check", "asr_check",
         "create_tool", "list_custom_tools", "remove_tool",
         "reload_mcp", "compact_memory", "compact_guides",
@@ -80,8 +91,10 @@ _TOOL_EXCLUDE_PROFILES = {
 
 def get_filtered_definitions(session_key="", is_group=False):
     """Return filtered tool definitions by context profile.
+    根据上下文配置返回过滤后的工具定义。
 
     Reduces token usage: voice saves ~18KB/request, scheduler saves ~15KB/request.
+    减少 token 使用：voice 每请求节省约 18KB，scheduler 每请求节省约 15KB。
     """
     if is_group:
         profile = "group"
@@ -104,7 +117,7 @@ def get_filtered_definitions(session_key="", is_group=False):
 
 
 # ============================================================
-#  Pre-reply — Status hints for long-running tools
+#  Pre-reply — Status hints for long-running tools - 预回复提示
 # ============================================================
 
 _TOOL_HINTS = {
@@ -145,14 +158,19 @@ _TOOL_HINTS = {
 
 
 def _pre_reply(tool_name, ctx):
-    """Send status hint to user before tool execution"""
+    """Send status hint to user before tool execution
+    工具执行前发送状态提示给用户
+    """
     # Scheduled tasks don't send hints (weather/news go straight to result)
+    # 调度任务不发送提示（天气/新闻直接发送结果）
     if ctx.get("session_key", "").startswith("scheduler"):
         return
     # Max 1 hint per chat() call (prevent spam from multi-tool searches)
+    # 每次 chat() 调用最多 1 个提示（防止多工具搜索时刷屏）
     if ctx.get("_pre_reply_sent"):
         return
     # Don't send during bootstrap (LLM handles its own intro)
+    # 引导期间不发送（LLM 自己处理介绍）
     workspace = ctx.get("workspace", "")
     if workspace and not os.path.exists(os.path.join(workspace, ".bootstrapped")):
         return
@@ -173,24 +191,30 @@ def _pre_reply(tool_name, ctx):
 
 
 # Tools restricted in group chat (write_file/schedule allowed: groups need file gen + reminders)
+# 群聊中受限的工具（write_file/schedule 允许：群聊需要文件生成 + 提醒）
 GROUP_RESTRICTED = {"exec", "edit_file"}
 
 
 # Circuit breaker: consecutive failure count (per-session)
-_tool_fail_counts = {}  # (session_key, tool_name) -> count
-_CIRCUIT_BREAKER_THRESHOLD = 3
+# 熔断器：连续失败计数（每会话）
+_tool_fail_counts = {}  # (session_key, tool_name) -> count (失败次数)
+_CIRCUIT_BREAKER_THRESHOLD = 3  # 熔断阈值
 
 
 def execute(name, args, ctx):
-    """Execute tool, return result string. Triggers circuit breaker after 3 consecutive failures."""
+    """Execute tool, return result string. Triggers circuit breaker after 3 consecutive failures.
+    执行工具，返回结果字符串。连续 3 次失败后触发熔断器。
+    """
     log.info(f"[tool] {name}({json.dumps(args, ensure_ascii=False)[:200]})")
 
     # Restrict dangerous tools in group chat
+    # 群聊中限制危险工具
     if ctx.get("is_group") and name in GROUP_RESTRICTED:
         log.warning("[tool] %s blocked in group chat", name)
         return "[error] this tool is not available in group chat, please DM me"
 
     # Circuit breaker check
+    # 熔断器检查
     fail_key = (ctx.get("session_key", ""), name)
     if _tool_fail_counts.get(fail_key, 0) >= _CIRCUIT_BREAKER_THRESHOLD:
         log.warning("[tool] %s circuit breaker triggered (>=%d consecutive failures)",
@@ -199,6 +223,7 @@ def execute(name, args, ctx):
                 "temporarily disabled. Please try a different approach or inform the user.")
 
     # Pre-reply status hint
+    # 预回复状态提示
     _pre_reply(name, ctx)
 
     entry = _registry.get(name)
@@ -207,8 +232,10 @@ def execute(name, args, ctx):
     try:
         result = entry["fn"](args, ctx)
         # Success: reset failure count
+        # 成功：重置失败计数
         _tool_fail_counts.pop(fail_key, None)
         # Global safety net: prevent any tool's oversized output from blowing up context
+        # 全局安全网：防止任何工具的超大输出撑爆上下文
         if isinstance(result, str) and len(result) > 12000:
             log.warning("[tool] %s output truncated: %d -> 12000", name, len(result))
             trunc_msg = "\n... [truncated at 12000/%d chars]" % len(result)
@@ -224,10 +251,13 @@ def execute(name, args, ctx):
         return f"[error] {e} (retryable, {count} failures so far)"
 
 # ============================================================
-#  Shared Helpers
+#  Shared Helpers - 共享辅助函数
 # ============================================================
 
 def _resolve_path(path, workspace):
+    """解析路径，防止目录遍历攻击
+    Resolve path, prevent directory traversal attack
+    """
     resolved = os.path.realpath(os.path.join(workspace, path))
     ws_real = os.path.realpath(workspace)
     if not resolved.startswith(ws_real + os.sep) and resolved != ws_real:
@@ -236,7 +266,9 @@ def _resolve_path(path, workspace):
 
 
 def _strip_markdown(text):
-    """Convert markdown to mobile-friendly plain text."""
+    """Convert markdown to mobile-friendly plain text.
+    将 Markdown 转换为适合移动设备的纯文本。
+    """
     lines = text.split("\n")
     out = []
     in_table = False
@@ -265,16 +297,25 @@ def _strip_markdown(text):
                 headers = []
         out.append(line)
     text = "\n".join(out)
+    # 移除加粗 (Remove bold)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"__(.+?)__", r"\1", text)
+    # 移除斜体 (Remove italic)
     text = re.sub(r"(?<![\w])\*(.+?)\*(?![\w])", r"\1", text)
+    # 移除标题 (Remove headers)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # 移除分隔线 (Remove separators)
     text = re.sub(r"^[\s]*[-*]{3,}[\s]*$", "", text, flags=re.MULTILINE)
+    # 移除行内代码 (Remove inline code)
     text = re.sub(r"`([^`]+)`", r"\1", text)
+    # 压缩多余空行 (Compress extra blank lines)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 def _split_message(text, max_bytes=1800):
+    """分割长消息，避免超过平台限制
+    Split long messages to avoid exceeding platform limits
+    """
     if len(text.encode("utf-8")) <= max_bytes:
         return [text]
     chunks, current = [], ""
