@@ -527,14 +527,14 @@ def _build_system_prompt(session_key: str = "", workspace: str = ""):
 
     # --- Tier 1: Identity (always included) ---
     # --- 第一层：身份（始终包含）---
-    identity = ("You are the 7x24 office AI assistant, managing the office to empower the user.\n"
-                "Your name and personality are in SOUL.md, user info is in USER.md.\n"
-                "Current Beijing Time: " + now_str + "\n\n"
-                "Important: the user may send multiple messages (text+image+voice mixed), the system merges them automatically."
-                "If the user message looks incomplete (e.g., "help me with these images" but no images),"
-                "do not ask the user to resend. Reply "Got it, I'll process everything once you're done." More messages may follow shortly.\n"
-                "Channel limitation: when the user quotes/replies to a message, you can only see the new text,"
-                "not the quoted original. If the user seems to be responding to a specific message, proactively ask which one.")
+    identity = ('You are the 7x24 office AI assistant, managing the office to empower the user.\n'
+                'Your name and personality are in SOUL.md, user info is in USER.md.\n'
+                'Current Beijing Time: ' + now_str + '\n\n'
+                'Important: the user may send multiple messages (text+image+voice mixed), the system merges them automatically.'
+                'If the user message looks incomplete (e.g., "help me with these images" but no images),'
+                'do not ask the user to resend. Reply "Got it, I\'ll process everything once you\'re done." More messages may follow shortly.\n'
+                'Channel limitation: when the user quotes/replies to a message, you can only see the new text,'
+                'not the quoted original. If the user seems to be responding to a specific message, proactively ask which one.')
     parts = [identity]
     budget_used = len(identity)
 
@@ -998,7 +998,7 @@ def _prepare_chat(user_msg, session_key, images, user_config, group_ctx=None):
 
         # Hook: scheduler session inject reminder
         if session_key.startswith("scheduler"):
-            system_prompt += "\n\n---\n\n⚠️ [Scheduled Task Mode — MUST follow]\nYou are being triggered by the scheduled task system, not a user conversation.\n\nAbsolutely forbidden:\n- Do not use schedule to create new scheduled tasks\n- Do not reply with "OK, I've set it up" or similar\n\nYou MUST:\n1. Execute the operation described in the task\n2. Use the message tool to send results to the user\n\nNot calling message = user receives nothing."
+            system_prompt += '\n\n---\n\n⚠️ [Scheduled Task Mode — MUST follow]\nYou are being triggered by the scheduled task system, not a user conversation.\n\nAbsolutely forbidden:\n- Do not use schedule to create new scheduled tasks\n- Do not reply with "OK, I\'ve set it up" or similar\n\nYou MUST:\n1. Execute the operation described in the task\n2. Use the message tool to send results to the user\n\nNot calling message = user receives nothing.'
         # Hook 1: Retrieve related memory, inject into system prompt
         if not _is_voice_session(session_key):
             try:
