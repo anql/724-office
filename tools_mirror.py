@@ -1,12 +1,28 @@
 """
-AI Mirror -- Behavioral Profile Tools
+AI Mirror — 行为画像工具
 
-Three-layer architecture code layer:
-1. Soul Report -- soul_report tool, analyzes behavioral data to generate HTML report
-2. Future Self -- future_self tool, starts "future self" conversation mode
+AI Mirror 是系统的自我反思模块，通过数据分析生成用户行为报告。
 
-Agent Diary is implemented via cron + existing tools, not in this file.
-Removal: delete this file + the import in tools.py + the rule in nudge.py.
+三层架构代码层:
+1. Soul Report (灵魂报告) — soul_report 工具，分析行为数据生成 HTML 报告
+2. Future Self (未来自己) — future_self 工具，启动"未来自我"对话模式
+
+功能说明:
+- 分析用户会话数据（消息量、工具使用、话题关键词）
+- 追踪承诺履行情况（从日记中提取承诺并检查后续是否执行）
+- 对比声明的优先级与实际行为
+- 使用 LLM 生成行为洞察（5-7 条具体观察）
+- 生成可视化 HTML 报告（包含雷达图、柱状图、趋势图等）
+- 支持"未来自我"对话模式（基于当前行为推演未来状态）
+
+Agent Diary 通过 cron + 现有工具实现，不在此文件中。
+移除方法：删除此文件 + tools.py 中的导入 + nudge.py 中的规则。
+
+使用场景:
+- 用户询问"我最近怎么样"
+- 想要了解自己的行为模式
+- 寻求自我反思和改进建议
+- 好奇未来发展趋势
 """
 
 import json
@@ -90,7 +106,36 @@ def _get_data_dir(workspace):
 
 
 def _analyze_sessions(workspace, days=30):
-    """Analyze session files: message volume, tool usage, topic keywords"""
+    """分析会话文件：消息量、工具使用、话题关键词
+    
+    扫描会话目录和归档目录，提取用户行为数据。
+    
+    参数:
+        workspace: 工作区路径
+        days: 分析天数（默认 30 天）
+    
+    返回:
+        dict: 分析结果，包含:
+            - total_user_msgs: 用户消息总数
+            - total_assistant_msgs: 助手消息总数
+            - days_with_data: 有数据的天数
+            - daily_msgs: 每日消息量字典
+            - tool_counts: 工具使用频率统计
+            - avg_msg_length: 平均消息长度
+            - topic_keywords: 话题关键词统计
+    
+    分析内容:
+        1. 扫描当前会话文件（JSON 格式）
+        2. 扫描归档目录（仅最近 N 天）
+        3. 提取日记文件中的每日消息统计
+        4. 统计工具调用频率
+        5. 提取中文 2-4 字词和英文 3+ 字母词作为话题关键词
+    
+    数据处理:
+        - 跳过空消息和非文本内容
+        - 过滤停用词（常见中文虚词）
+        - 使用 Counter 进行频率统计
+    """
     sessions_dir = os.path.join(_get_data_dir(workspace), "sessions")
     if not os.path.isdir(sessions_dir):
         log.warning("[mirror] sessions dir not found: %s", sessions_dir)
@@ -194,7 +239,35 @@ def _analyze_sessions(workspace, days=30):
 
 
 def _analyze_commitments(workspace, days=30):
-    """Analyze commitments and follow-through from diary entries"""
+    """分析承诺和履行情况（从日记条目中提取）
+    
+    通过正则表达式匹配日记中的承诺语句，并检查后续日记是否提及相关内容。
+    
+    参数:
+        workspace: 工作区路径
+        days: 分析天数（默认 30 天）
+    
+    返回:
+        dict: 分析结果，包含:
+            - total: 承诺总数
+            - fulfilled: 已履行数量
+            - rate: 履行率（百分比）
+            - recent: 最近 5 条承诺
+    
+    承诺匹配模式:
+        - 说要、计划、打算、承诺、答应、准备、目标是、决定、要去、要做
+        - 正则表达式：(?:说要 | 计划 | 打算 | 承诺 | 答应 | 准备 | 目标是 | 决定 | 要去 | 要做)(.*?)(?:\n|$|。|；)
+    
+    履行检查逻辑:
+        1. 从承诺文本中提取中文 2+ 字关键词
+        2. 在承诺日期之后的日记中搜索这些关键词
+        3. 如果找到匹配，视为已履行
+    
+    设计考虑:
+        - 关键词匹配而非精确匹配，提高容错性
+        - 限制最近 5 条承诺，避免数据过大
+        - 履行检查只看向后的日记，符合时间逻辑
+    """
     diary_dir = os.path.join(workspace, "memory")
     if not os.path.isdir(diary_dir):
         return {"total": 0, "fulfilled": 0, "rate": 0, "recent": []}
@@ -268,7 +341,38 @@ def _analyze_priorities(workspace, sessions_data):
 # ============================================================
 
 def _synthesize_insights(sessions, commitments, priorities):
-    """Use LLM to synthesize 5-7 behavioral insights"""
+    """使用 LLM 合成 5-7 条行为洞察
+    
+    将分析数据汇总后发送给 LLM，让其生成有洞察力的行为观察。
+    
+    参数:
+        sessions: 会话分析数据
+        commitments: 承诺履行数据
+        priorities: 优先级对比数据
+    
+    返回:
+        list: 洞察列表，每条包含:
+            - title: 4-8 字标题
+            - insight: 30-60 字洞察描述
+            - data_point: 数据证据
+    
+    LLM 提示词要求:
+        1. 每条洞察必须有具体数据支撑（引用数字）
+        2. 诚实但不刻薄，像关心的朋友
+        3. 指出用户说的和做的之间的差距
+        4. 发现用户可能没注意到的模式
+        5. 具体而非泛泛而谈
+    
+    数据处理:
+        - 限制 JSON 摘要在 8000 字符以内
+        - 提取 top 10 工具和话题
+        - 包含承诺履行率和最近承诺
+    
+    错误处理:
+        - LLM 调用失败返回空列表
+        - JSON 解析失败尝试正则提取
+        - 记录警告日志
+    """
     summary = json.dumps({
         "user_msgs": sessions.get("total_user_msgs"),
         "days": sessions.get("days_with_data"),
@@ -531,11 +635,46 @@ def _generate_report_html(sessions, commitments, priorities, insights):
 # ============================================================
 
 @tool("soul_report",
-      "Generate a user behavioral profile report (AI Mirror - Soul Report). Analyzes conversation, memory, and commitment data from the past N days "
-      "to produce an honest behavioral analysis page. Suitable when user asks 'how am I doing lately' or wants to understand their behavioral patterns.",
-      {"days": {"type": "integer", "description": "Number of days to analyze (default 30)"}},
+      "生成用户行为画像报告（AI Mirror - 灵魂报告）。分析过去 N 天的对话、记忆和承诺数据，"
+      "生成诚实的行为分析页面。适合用户询问'我最近怎么样'或想了解自己行为模式时使用。",
+      {"days": {"type": "integer", "description": "分析天数（默认 30 天）"}},
       [])
 def tool_soul_report(args, ctx):
+    """灵魂报告工具主函数
+    
+    生成用户行为画像的完整流程:
+    1. 分析会话数据（消息量、工具使用、话题）
+    2. 分析承诺履行情况
+    3. 对比声明优先级与实际行为
+    4. LLM 合成行为洞察
+    5. 生成 HTML 报告
+    6. 发送链接卡片给用户
+    
+    参数:
+        args: 工具参数，包含 days
+        ctx: 上下文，包含 workspace 和 owner_id
+    
+    返回:
+        str: 成功时返回报告 URL，失败时返回错误信息
+    
+    数据要求:
+        - 至少 7 天的交互数据才能生成有意义的报告
+        - 数据不足时返回提示信息
+    
+    报告内容:
+        - 承诺履行率（大数字卡片）
+        - 行为画像雷达图（工作/学习/社交/健康/记录）
+        - 工具使用分布（Top 10）
+        - 每日活动趋势（最近 14 天）
+        - 话题分布（饼图）
+        - 声明优先级 vs 实际话题对比
+        - AI 洞察卡片（5-7 条）
+    
+    安全特性:
+        - 使用完整 UUID（32 字符）防止暴力猜测
+        - 报告 24 小时后过期
+        - 提醒用户谨慎分享链接
+    """
     workspace = ctx.get("workspace", "")
     days = args.get("days", 30)
     owner_id = ctx.get("owner_id")
@@ -610,11 +749,52 @@ def _get_mirror_dir(workspace):
 
 
 @tool("future_self",
-      "Start 'future self' conversation mode. Simulates what the user would be like at a specified age based on real accumulated behavioral data. Supports multi-turn conversation. "
-      "Say 'exit' or 'end' to return to normal mode.",
-      {"age": {"type": "integer", "description": "Age to converse with (30/40/50/60)"}},
+      "启动'未来自我'对话模式。基于真实积累的行为数据，模拟用户在指定年龄时的状态。支持多轮对话。"
+      "说 'exit' 或 'end' 返回正常模式。",
+      {"age": {"type": "integer", "description": "对话的年龄（30/40/50/60 等，范围 25-80）"}},
       ["age"])
 def tool_future_self(args, ctx):
+    """未来自我工具主函数
+    
+    创建一个基于用户当前行为模式推演的未来人格，进行对话。
+    
+    参数:
+        args: 工具参数，包含 age（目标年龄）
+        ctx: 上下文，包含 workspace
+    
+    返回:
+        str: 未来自我的开场白
+    
+    核心流程:
+        1. 收集用户行为数据（会话分析）
+        2. LLM 合成人格画像（基于数据推演）
+        3. 构建人格提示词（注入到系统提示）
+        4. 保存状态文件（支持多轮对话）
+        5. 生成开场白
+    
+    人格画像要求:
+        - 基于当前行为模式外推到目标年龄
+        - 诚实：如果当前模式持续，未来会是什么状态
+        - 第一人称"我"，温暖但直接
+        - 包含 3-5 个人生转折点（从当前行为推演）
+        - 400 字以内
+    
+    对话规则:
+        - 使用第一人称"我"，你就是他们的未来版本
+        - 基于真实数据说话，不编造经历
+        - 可以表达遗憾、自豪、困惑等真实情感
+        - 用户说"exit"或"end conversation"时告别并退出
+        - 不使用任何工具，仅对话
+    
+    状态管理:
+        - 状态文件保存在 workspace/mirror/.future_self_active
+        - 超时时间：30 分钟（自动清理）
+        - 支持多轮对话（状态保持）
+    
+    年龄限制:
+        - 最小 25 岁，最大 80 岁
+        - 超出范围返回提示信息
+    """
     workspace = ctx.get("workspace", "")
     age = args["age"]
 

@@ -1,14 +1,41 @@
 """
-MCP Client — Connect external MCP Servers, register their tools into the agent
+MCP 客户端 — 连接外部 MCP 服务器，将其工具注册到 Agent 中
 
-Self-implemented JSON-RPC (no MCP SDK), zero new dependencies.
-MCP protocol only needs 3 methods: initialize, tools/list, tools/call.
+MCP (Model Context Protocol) 是一种标准化协议，用于连接 AI Agent 与外部工具/服务。
 
-Usage (called by tools.py):
-  mcp_client.init(config)           # Connect all config["mcp_servers"]
-  mcp_client.get_all_tool_defs()    # Return OpenAI function calling format
-  mcp_client.execute(name, args)    # Call (name = servername__toolname)
-  mcp_client.shutdown()             # Close all server processes
+自实现 JSON-RPC（无 MCP SDK），零新增依赖。
+MCP 协议仅需 3 个方法：initialize, tools/list, tools/call。
+
+核心功能:
+1. 连接 MCP 服务器（stdio 或 HTTP 传输）
+2. 工具发现（tools/list）
+3. 工具调用（tools/call）
+4. 自动重连（崩溃后恢复）
+5. 热重载（不重启 Agent 更新配置）
+6. 工具命名空间（servername__toolname）
+
+使用方法（由 tools.py 调用）:
+  mcp_client.init(config)           # 连接所有 config["mcp_servers"]
+  mcp_client.get_all_tool_defs()    # 返回 OpenAI function calling 格式
+  mcp_client.execute(name, args)    # 调用工具（name = servername__toolname）
+  mcp_client.reload(config)         # 热重载配置
+  mcp_client.shutdown()             # 关闭所有服务器进程
+
+传输方式:
+- stdio: 通过子进程 stdin/stdout 通信（本地服务器）
+- HTTP: 通过 HTTP POST 通信（远程服务器）
+
+错误处理:
+- 超时检测（30 秒）
+- 脏标记（dirty flag）检测不可靠连接
+- 自动重连（崩溃后尝试一次）
+- 优雅关闭（先尝试正常关闭，失败则 kill）
+
+设计原则:
+- 零外部依赖（纯标准库）
+- 线程安全（锁保护）
+- 流式 JSON-RPC（支持 npm 警告等非 JSON 输出）
+- 工具命名空间隔离（防止命名冲突）
 """
 
 import json

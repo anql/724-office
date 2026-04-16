@@ -1,9 +1,28 @@
 """
-Messaging Platform API — text/image/video/file/link/GIF/voice send + CDN upload/download
+消息平台 API — 文本/图片/视频/文件/链接/GIF/语音发送 + CDN 上传/下载
 
-All messaging platform interactions are in this file. Other modules only need to call
-functions here.
-Dependencies: standard library (json, urllib, os, time, logging)
+所有与消息平台的交互都在此文件中。其他模块只需调用这里的函数。
+
+功能模块:
+1. 初始化配置 (init)
+2. 底层 API 调用 (api) — 自动重试机制
+3. 文本发送 (send_text)
+4. CDN 上传 (upload) — 支持 URL 和本地文件
+5. 媒体发送 (send_image/send_video/send_file/send_gif/send_voice/send_link)
+6. 上传 + 发送一体化 (upload_and_send)
+7. 媒体下载 (download_media/download_wx/download_wx_work)
+8. 联系人信息 (get_contact_info)
+9. 位置发送 (send_location)
+10. 名片发送 (send_namecard)
+
+依赖：标准库 (json, urllib, os, time, logging, http.client)
+
+设计原则:
+- 零外部依赖
+- 自动重试（3 次，指数退避）
+- 流式上传（恒定内存占用）
+- 智能文件类型识别
+- 统一的错误处理
 """
 
 import http.client
@@ -38,12 +57,42 @@ def init(messaging_config):
 # ============================================================
 
 def api(method, params):
-    """Call messaging platform API (auto-retry 3 times on network error, exponential backoff)"""
+    """调用消息平台 API（网络错误时自动重试 3 次，指数退避）
+    
+    所有消息平台 API 调用的统一入口。
+    处理认证、重试、错误日志等通用逻辑。
+    
+    参数:
+        method: API 方法名（如 "/msg/sendText"）
+        params: 方法参数（会自动添加 guid）
+    
+    返回:
+        dict: API 响应结果，包含 code 和 msg/data 等字段
+    
+    重试机制:
+        - 最大重试次数：3 次
+        - 退避延迟：2s -> 4s -> 8s（指数增长）
+        - 仅对网络错误重试（URLError, OSError, TimeoutError）
+        - 其他错误直接返回
+    
+    认证处理:
+        - 自动添加 guid 到参数
+        - X-API-TOKEN 请求头认证
+    
+    错误处理:
+        - 网络错误：重试后返回 code=-1
+        - API 错误：记录日志并返回原始结果
+        - 未知错误：记录日志并返回 code=-1
+    
+    日志记录:
+        - 警告：重试时的网络错误
+        - 错误：最终失败或 API 返回非 0 code
+    """
     params["guid"] = _config["guid"]
     body = json.dumps({"method": method, "params": params}).encode("utf-8")
 
     max_retries = 3
-    backoff_delays = [2, 4, 8]
+    backoff_delays = [2, 4, 8]  # 指数退避延迟序列
 
     for attempt in range(max_retries + 1):
         req = urllib.request.Request(
@@ -124,19 +173,50 @@ def _cdn_upload_url(file_url, filename, file_type):
 
 
 def _cdn_upload_binary(filepath, file_type):
-    """Stream local file to CDN (multipart/form-data)
-
-    Uses http.client for true streaming upload:
-    - Calculate Content-Length first (form fields + file header + file size + footer)
-    - Then read file in chunks from disk to socket, constant ~64KB memory usage
-    - 200MB video and 200KB image use the same amount of memory
+    """流式上传本地文件到 CDN（multipart/form-data）
+    
+    使用 http.client 实现真正的流式上传：
+    - 先计算 Content-Length（表单字段 + 文件头 + 文件大小 + 结尾）
+    - 然后分块从磁盘读取文件内容发送到 socket，恒定约 64KB 内存占用
+    - 200MB 视频和 200KB 图片使用相同的内存量
+    
+    参数:
+        filepath: 本地文件路径
+        file_type: 文件类型（1=图片，4=视频，5=文件/语音）
+    
+    返回:
+        dict: CDN 返回的文件信息（fileId, fileKey 等），失败返回 None
+    
+    流式上传原理:
+        1. 构建 multipart 表单的各个部分（字段、文件头、文件尾）
+        2. 计算总 Content-Length（需要精确值）
+        3. 建立 HTTP 连接，发送请求头
+        4. 发送表单字段和文件头
+        5. 分块读取文件内容并发送（64KB/块）
+        6. 发送结尾标记
+        7. 读取响应并解析
+    
+    内存优化:
+        - 不一次性加载整个文件到内存
+        - 使用固定大小的缓冲区（64KB）
+        - 适合大文件上传（视频等）
+    
+    连接管理:
+        - HTTPS 使用 SSL 上下文
+        - 超时设置 300 秒（5 分钟）
+        - 上传完成后关闭连接
+    
+    日志记录:
+        - 大于 50MB 的文件记录流式上传提示
+        - 成功记录文件大小
+        - 失败记录错误信息
     """
     filename = os.path.basename(filepath)
     file_size = os.path.getsize(filepath)
     boundary = f"----AgentBoundary{int(time.time() * 1000)}"
-    CHUNK_SIZE = 65536  # 64KB chunks
+    CHUNK_SIZE = 65536  # 64KB 分块大小
 
-    # Build multipart parts (all small strings except file content)
+    # Build multipart parts (构建 multipart 表单各部分)
     field_parts = b""
     for key, val in [("method", "/cloud/cdnBigUpload"), ("guid", _config["guid"]), ("fileType", str(file_type))]:
         field_parts += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{val}\r\n".encode()
@@ -168,6 +248,7 @@ def _cdn_upload_binary(filepath, file_type):
         conn.endheaders()
 
         # Stream: form fields -> file header -> file content (chunked) -> footer
+        # 流式发送：表单字段 -> 文件头 -> 文件内容（分块） -> 结尾
         conn.send(field_parts)
         conn.send(file_header)
         with open(filepath, "rb") as f:
@@ -194,13 +275,51 @@ def _cdn_upload_binary(filepath, file_type):
 
 
 def upload(filepath, workspace=""):
-    """Smart upload: URLs use URL upload (fallback to download+binary), local files use binary.
-    Returns CDN dict or None."""
+    """智能上传：URL 使用 URL 上传（失败时降级为下载 + 二进制），本地文件使用二进制上传。
+    
+    根据文件路径类型自动选择最优上传策略。
+    
+    参数:
+        filepath: 文件路径或 URL
+        workspace: 工作区路径（用于解析相对路径）
+    
+    返回:
+        dict: CDN 文件信息，失败返回 None
+    
+    上传策略:
+        1. URL 文件:
+           - 优先使用 URL 直接上传（CDN 拉取）
+           - 失败时下载到临时文件，再二进制上传
+           - 视频上传失败时尝试降级为文件类型
+        
+        2. 本地文件:
+           - 解析相对路径（相对于 workspace）
+           - 检查文件存在性
+           - 二进制流式上传
+           - 视频上传失败时尝试降级为文件类型
+    
+    文件类型识别:
+        - 图片：.jpg, .jpeg, .png, .webp, .bmp, .gif -> type=1
+        - 视频：.mp4, .mov, .avi -> type=4
+        - 其他：.amr, .mp3, .wav, .silk 及所有其他文件 -> type=5
+    
+    错误处理:
+        - URL 下载失败：记录错误，返回 None
+        - 文件不存在：记录错误，返回 None
+        - 上传失败：尝试降级类型（视频->文件）
+        - 临时文件：上传后自动清理
+    
+    使用场景:
+        - 发送网络图片/视频
+        - 发送本地生成的文件
+        - 发送用户下载的资源
+    """
     ext = get_ext(filepath)
     file_type = _get_file_type(ext)
     is_url = filepath.startswith("http://") or filepath.startswith("https://")
 
     if is_url:
+        # URL 上传流程
         filename = os.path.basename(urlparse(filepath).path) or f"file{ext}"
         cdn = _cdn_upload_url(filepath, filename, file_type)
         if not cdn:
@@ -210,9 +329,9 @@ def upload(filepath, workspace=""):
                 urllib.request.urlretrieve(filepath, tmp_path)
                 cdn = _cdn_upload_binary(tmp_path, file_type)
                 if not cdn and file_type == 4:
-                    cdn = _cdn_upload_binary(tmp_path, 5)
+                    cdn = _cdn_upload_binary(tmp_path, 5)  # 视频降级为文件类型
                 try:
-                    os.unlink(tmp_path)
+                    os.unlink(tmp_path)  # 清理临时文件
                 except Exception:
                     pass
             except Exception as e:
@@ -220,6 +339,7 @@ def upload(filepath, workspace=""):
                 cdn = None
         return cdn
     else:
+        # 本地文件上传流程
         if not os.path.isabs(filepath) and workspace:
             filepath = os.path.join(workspace, filepath)
         if not os.path.exists(filepath):
@@ -227,7 +347,7 @@ def upload(filepath, workspace=""):
             return None
         cdn = _cdn_upload_binary(filepath, file_type)
         if not cdn and file_type == 4:
-            cdn = _cdn_upload_binary(filepath, 5)
+            cdn = _cdn_upload_binary(filepath, 5)  # 视频降级为文件类型
         return cdn
 
 

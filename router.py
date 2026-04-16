@@ -1,9 +1,39 @@
 """
-Docker Router — Route by sender_id to corresponding container, auto-provision unknown users
+Docker 路由器 — 按 sender_id 路由到对应容器，自动配置未知用户
 
-Receive messaging platform callbacks, parse sender_id:
-- Known user -> forward to corresponding container
-- Unknown user -> auto-create container -> wait for health check -> forward
+多租户系统的核心路由层，负责消息分发和容器编排。
+
+接收消息平台回调，解析 sender_id:
+- 已知用户 -> 转发到对应容器
+- 未知用户 -> 自动创建容器 -> 等待健康检查 -> 转发
+
+核心功能:
+1. 路由表管理 (routing.json)
+2. 自动配置容器（Docker Engine API）
+3. 健康检查和重试
+4. 消息去重（2 秒内相同回调）
+5. 群聊消息特殊处理
+6. 启动时自愈（扫描现有容器重建路由）
+7. 容器数量限制保护
+
+架构设计:
+- 一个容器 per 用户（隔离）
+- Docker 网络内部通信
+- HTTP 健康检查
+- 线程安全（锁保护）
+- 后台线程处理转发
+
+配置项:
+- MAX_CONTAINERS: 最大容器数（默认 20）
+- CONTAINER_MEMORY: 每容器内存限制（默认 256m）
+- PROVISION_TIMEOUT: 配置超时（默认 45 秒）
+- DOCKER_NETWORK: Docker 网络名称
+
+安全特性:
+- 容器数量限制防止资源耗尽
+- 回调去重防止重复处理
+- 内部请求验证（/reload, /routes）
+- 路径遍历防护
 """
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -153,14 +183,66 @@ def _parse_memory_bytes(mem_str):
 
 
 def provision_container(sender_id):
-    """Create container for new user, return backend_url or None. Holds lock throughout, one provision at a time."""
-
+    """为新用户创建容器，返回 backend_url 或 None。全程持有锁，一次只配置一个容器。
+    
+    自动配置流程:
+    1. 双重检查（避免重复配置）
+    2. 检查容器数量限制
+    3. 生成容器名称（agent-u + sender_id 后 8 位）
+    4. 构建环境变量（OWNER_ID, MODEL_DEFAULT 等）
+    5. 调用 Docker API 创建容器
+    6. 启动容器
+    7. 等待健康检查（HTTP 可达）
+    8. 更新路由表
+    9. 返回后端 URL
+    
+    参数:
+        sender_id: 用户 ID（用于生成容器名和路由）
+    
+    返回:
+        tuple: (backend_url, newly_created)
+            - backend_url: 后端服务 URL（如 "http://agent-u12345678:8080"）
+            - newly_created: 是否新创建（True=新创建，False=已存在）
+    
+    容器配置:
+        - 镜像：APP_IMAGE（环境变量配置）
+        - 内存：CONTAINER_MEMORY（默认 256m）
+        - 重启策略：unless-stopped
+        - 健康检查：每 5 秒检查一次，超时 3 秒，重试 3 次
+        - 网络：DOCKER_NETWORK
+        - 卷挂载：host_volume:/data, /data/agent/pages:/pages
+    
+    环境变量:
+        - OWNER_ID: 用户 ID
+        - USER_NAME: new_user
+        - MODEL_DEFAULT: kimi-k2.5
+        - AGENT_DATA: /data
+        - AGENT_CONFIG: /data/config.json
+        - MCP_SERVERS: {}
+        - TZ: Asia/Shanghai
+    
+    健康检查:
+        - 轮询容器 HTTP 服务（8080 端口）
+        - 超时时间：PROVISION_TIMEOUT（默认 45 秒）
+        - 即使不健康也添加路由（容器可能仍在启动）
+    
+    线程安全:
+        - 使用_provision_lock 防止并发配置
+        - 双重检查避免重复创建
+    
+    错误处理:
+        - 容器数量超限：返回 None
+        - 创建失败：记录错误，返回 None
+        - 启动失败：删除容器，返回 None
+        - 健康检查超时：记录警告，仍添加路由
+    """
     with _provision_lock:
         # Double-check (may have been provisioned by another thread while waiting for lock)
+        # 双重检查（避免等待锁期间被其他线程配置）
         if sender_id in ROUTING:
             return ROUTING[sender_id], False  # Already exists, not newly created
 
-        # Check container count limit
+        # Check container count limit (检查容器数量限制)
         current_count = count_user_containers()
         if current_count >= MAX_CONTAINERS:
             log.warning("Container limit reached (%d/%d), rejecting sender_id=%s",

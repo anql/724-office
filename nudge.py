@@ -1,18 +1,54 @@
 """
-Nudge Registry — Detect when LLM "has tools but doesn't use them", auto-inject hints
+Nudge Registry — 提示注册表
 
+检测 LLM"有工具但不使用"时自动注入提示的系统。
+
+核心原理:
 Code-level implementation of Principle 2: don't rely on prompts to constrain behavior,
 use structure to make errors impossible.
+原则 2 的代码级实现：不依赖提示词约束行为，用结构让错误不可能发生。
 
-When the LLM searched for results but forgot to send a location card, or said "noted"
-but didn't call write_file, the system auto-injects a hint message so the LLM runs
-one more iteration to execute.
+当 LLM 搜索到结果但忘记发送位置卡片，或说"已记录"但没调用 write_file 时，
+系统自动注入提示消息，让 LLM 再运行一轮执行。
 
-Usage (at end of tool loop in llm.py):
+使用方法（在 llm.py 工具循环末尾）:
     nudge_msg = check_nudges(tools_called, reply_text, tool_results)
     if nudge_msg:
         messages.append({"role": "user", "content": nudge_msg})
-        continue  # Let LLM run one more iteration
+        continue  # Let LLM run one more iteration (让 LLM 再运行一轮)
+
+内置规则:
+1. search_nearby->send_location: 搜索附近返回结果但未发送位置卡片
+2. said_recorded->write_file: 说"已记录"但未调用 write_file
+3. said_scheduled->schedule: 说"已安排"但未调用 schedule
+4. structured_data->render_page: 有结构化数据但未调用 render_page
+5. self_reflect->soul_report: 进行行为分析但未生成灵魂报告
+
+设计原则:
+- 结构性纠正：不依赖 LLM 记忆，用代码强制检查
+- 最小干预：只在必要时注入提示
+- 防止死循环：max_fires 限制触发次数
+- 可扩展：通过 register() 添加新规则
+
+工作流程:
+1. LLM 回复后，检查已调用的工具和回复文本
+2. 匹配 nudge 规则（触发函数返回 True）
+3. 如果触发且未达上限，注入提示消息
+4. LLM 收到提示后重新运行一轮，执行遗漏的操作
+
+技术实现:
+- 规则注册表模式（_nudge_rules 列表）
+- 触发函数（trigger_fn）判断是否满足条件
+- 触发计数（_fire_counts）防止无限循环
+- 上下文对象（ctx）传递工具调用、回复文本、工具结果
+
+扩展方法:
+    register(
+        "规则名称",
+        lambda ctx: 触发条件，
+        "注入给 LLM 的提示文本",
+        max_fires=1  # 最大触发次数
+    )
 """
 
 import logging
@@ -21,19 +57,27 @@ import re
 log = logging.getLogger("agent")
 
 # ============================================================
-#  Nudge Rule Registry
+#  Nudge Rule Registry - 提示规则注册表
 # ============================================================
 
-_nudge_rules = []
+_nudge_rules = []  # 提示规则列表
 
 
 def register(name, trigger_fn, message, max_fires=1):
     """Register a nudge rule.
-
-    trigger_fn(ctx) -> bool
-      ctx = {"tools_called": set, "reply_text": str, "tool_results": dict}
-    message: hint text injected to LLM
-    max_fires: max triggers per chat session (prevents loops)
+    注册提示规则
+    
+    参数:
+        name: 规则名称
+        trigger_fn: 触发函数，签名 trigger_fn(ctx) -> bool
+            ctx = {"tools_called": set, "reply_text": str, "tool_results": dict}
+        message: 注入给 LLM 的提示文本
+        max_fires: 每次聊天会话最大触发次数（防止死循环）
+    
+    工作原理:
+        - 在 LLM 回复后检查是否满足触发条件
+        - 如果满足则注入提示消息，让 LLM 重新运行一轮
+        - 通过 max_fires 防止无限循环
     """
     _nudge_rules.append({
         "name": name,

@@ -1,18 +1,41 @@
 #!/usr/bin/env python3
 """
-Daily Black Box Archive Script
+每日黑盒归档脚本
 
-Runs twice daily (14:00 + 02:00), saves all objective events.
-Archive directory: workspace/archive/YYYY-MM-DD/
+系统的黑盒记录器，每天运行两次（14:00 + 02:00），保存所有客观事件。
+归档目录：workspace/archive/YYYY-MM-DD/
 
-Archive contents:
-1. Conversation session snapshots (full text, no truncation)
-2. Scheduled task session snapshots
-3. System behavior logs (journald)
-4. File index snapshot (image/voice/file references)
-5. Scheduled task config snapshot (jobs.json)
+归档内容:
+1. 对话会话快照（完整文本，无截断）
+2. 定时任务会话快照
+3. 系统行为日志（journald，容器环境使用 docker logs）
+4. 文件索引快照（图片/语音/文件引用）
+5. 定时任务配置快照（jobs.json）
+6. 当日记忆文件快照（memory/YYYY-MM-DD.md）
 
-Pure standard library, no external dependencies.
+设计目的:
+- 完整记录系统行为，便于调试和审计
+- 防止数据丢失（会话可能被压缩/清理）
+- 支持历史回溯和分析
+- 符合"黑盒记录器"设计原则
+
+归档策略:
+- 按日期组织目录（YYYY-MM-DD）
+- 按时间戳标记文件（HHMM）
+- 增量归档（仅归档今日修改的会话）
+- 去重合并（避免重复记录）
+
+技术特性:
+- 纯标准库，无外部依赖
+- JSONL 格式（便于流式读取）
+- 元数据记录（meta_HHMM.json）
+- 容器环境适配（检测/.dockerenv）
+
+使用场景:
+- 系统调试（查看历史行为）
+- 数据分析（用户行为模式）
+- 合规审计（完整记录）
+- 故障恢复（数据备份）
 """
 
 import json

@@ -1,9 +1,55 @@
 #!/usr/bin/env python3
 """
-Agent code audit script — 11 automated checks
+Agent 代码审计脚本 — 11 项自动化检查
 
-Pure stdlib, < 60s, < 50MB RAM, outputs structured JSON.
-Usage: python3 audit.py [--checks syntax,config_schema,...]
+系统的自我诊断工具，定期检查代码和配置健康状态。
+
+11 项检查:
+1. syntax: Python 语法检查（AST 解析）
+2. config_schema: config.json 结构完整性
+3. permissions: 文件权限检查（config.json 应为 0600）
+4. tool_registry: 工具注册和文档一致性
+5. session_health: 会话文件健康（大小、格式）
+6. disk_usage: 磁盘使用量（sessions/memory_db/workspace/mcp_servers）
+7. process_health: 进程/服务状态
+8. git_status: Git 仓库状态（未提交变更）
+9. stale_files: 过期/孤立文件（.bak, .tmp）
+10. anti_patterns: 反模式扫描（bare except, import *, print）
+11. jobs_health: 定时任务健康（cron 格式、执行时间）
+
+技术特性:
+- 纯标准库，无外部依赖
+- 执行时间 < 60 秒
+- 内存占用 < 50MB
+- 输出结构化 JSON
+- 增量比较（磁盘增长检测）
+
+使用方法:
+  python3 audit.py                    # 运行所有检查
+  python3 audit.py --checks syntax,config_schema  # 运行指定检查
+
+输出格式:
+{
+  "timestamp": "2026-04-15 23:00:00",
+  "duration_ms": 1234,
+  "checks": {
+    "syntax": {"status": "pass", "details": []},
+    "config_schema": {"status": "warn", "details": [...]},
+    ...
+  },
+  "summary": {"total_checks": 11, "pass": 9, "warn": 2, "fail": 0}
+}
+
+状态说明:
+- pass: 检查通过
+- warn: 警告（非关键问题）
+- fail: 失败（关键问题，需要立即处理）
+
+设计原则:
+- 非侵入式（只读检查）
+- 快速失败（异常捕获）
+- 结构化输出（便于自动化处理）
+- 增量比较（磁盘增长检测）
 """
 
 import ast
