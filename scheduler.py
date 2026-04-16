@@ -210,7 +210,7 @@ def add(args):
         _save_jobs()
 
     log.info(f"[scheduler] added: {name} — {desc}")
-    return f"Created scheduled task"{name}"— {desc}" + (f"(auto-corrected year -> {target_time})" if year_corrected else "")
+    return f'Created scheduled task "{name}" — {desc}' + (f" (auto-corrected year -> {target_time})" if year_corrected else "")
 
 
 def list_all(owner_id=None):
@@ -235,8 +235,8 @@ def remove(name, owner_id=None):
         _jobs[:] = [j for j in _jobs if not (j["name"] == name and (not owner_id or j.get("owner_id", "") == owner_id))]
         _save_jobs()
         if len(_jobs) < before:
-            return f"Deleted scheduled task"{name}""
-        return f"Task not found"{name}""
+            return f'Deleted scheduled task "{name}"'
+        return f'Task not found "{name}"'
 
 
 # ============================================================
@@ -667,7 +667,7 @@ def _trigger(job):
         log.error(f"[scheduler] {job['name']} FAILED: {e}", exc_info=True)
         try:
             _chat_fn(
-                f"Scheduled task "{job['name']}" failed with error: {e}. Please use the message tool to notify the user.",
+                f'Scheduled task "{job["name"]}" failed with error: {e}. Please use the message tool to notify the user.',
                 main_session_key, images=None, user_config=user_config
             )
         except Exception:
