@@ -1,11 +1,32 @@
 """
-LLM Calls + Tool Use Loop + Session Management
 LLM 调用 + 工具使用循环 + 会话管理
 
-Core loop: user message -> LLM -> tool calls -> execute -> LLM -> ... -> final reply
-核心循环：用户消息 -> LLM -> 工具调用 -> 执行 -> LLM -> ... -> 最终回复
-Multimodal support: images passed via image_url (base64) to LLM.
-多模态支持：图片通过 image_url (base64) 传递给 LLM。
+系统的核心大脑，负责与 LLM 交互、工具调用循环、会话管理。
+
+核心循环:
+    用户消息 -> LLM -> 工具调用 -> 执行 -> LLM -> ... -> 最终回复
+
+主要功能:
+1. LLM API 调用（多提供商支持、降级链、429 重试）
+2. 工具使用循环（最多 20 次迭代）
+3. 会话管理（加载/保存/归档、图片处理）
+4. 多模态支持（图片 base64 编码）
+5. 系统提示构建（预算感知、记忆注入）
+6. Nudge 集成（结构性行为纠正）
+7. 模型选择（语音/聊天/调度器分离）
+
+技术特性:
+- 多模型支持（kimi-k2.5、minimax-highspeed 等）
+- 会话消息数限制（普通 40 条、调度器 200 条、语音 10 条）
+- 超时控制（120 秒）
+- 错误重试（网络错误 3 次）
+- 预算追踪（token 使用监控）
+
+设计原则:
+- 纯 Python 标准库 + 少量依赖
+- 零框架依赖
+- 模块化设计
+- 可观测性（详细日志）
 """
 
 import base64

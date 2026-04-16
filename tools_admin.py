@@ -1,6 +1,28 @@
 """
-Admin / diagnostic / plugin / MCP tools
 管理/诊断/插件/MCP 工具
+
+系统级工具集合，提供核心管理功能。
+
+功能分类:
+1. 文件操作：read_file, write_file, edit_file, list_files
+2. 命令执行：exec（带安全黑名单）
+3. 插件系统：create_tool, list_custom_tools, remove_tool
+4. MCP 管理：reload_mcp
+5. 诊断工具：self_check, diagnose, task_history, code_audit, asr_check, daily_digest
+6. 记忆管理：compact_memory, compact_guides
+7. 消息工具：message（发送消息）
+
+安全特性:
+- exec 命令黑名单（rm -rf, sudo, curl 管道等）
+- 插件执行沙箱（受限内置函数）
+- 导入白名单（仅允许安全模块）
+- 路径遍历防护
+
+设计原则:
+- 最小权限原则
+- 防御性编程
+- 详细日志记录
+- 错误隔离
 """
 
 import json
@@ -18,16 +40,53 @@ from tools_base import tool, _registry, log
 _plugins_dir = os.path.join(os.environ.get("AGENT_DATA", os.path.dirname(os.path.abspath(__file__))), "plugins")
 
 def _exec_plugin(code, source="<plugin>"):
-    """Execute plugin code in a controlled environment. Plugins can use @tool to register tools.
-    在受控环境中执行插件代码。插件可以使用@tool 注册工具。
-    Restricted builtins: removes eval/exec/compile/__import__ and other dangerous functions.
-    受限内置函数：移除 eval/exec/compile/__import__ 等危险函数。
+    """在受控环境中执行插件代码
+    
+    插件系统允许用户动态添加自定义工具，但必须在沙箱中运行。
+    插件可以使用@tool 装饰器注册新工具。
+    
+    参数:
+        code: 插件 Python 代码
+        source: 源代码标识（用于错误信息）
+    
+    安全限制:
+        1. 受限内置函数：移除危险函数
+           - eval, exec, compile: 代码执行
+           - __import__: 直接导入
+           - globals, locals: 作用域访问
+           - breakpoint, exit, quit: 程序控制
+        
+        2. 导入白名单：仅允许安全模块
+           - 数据处理：json, os, os.path, re, math, time, datetime
+           - 网络：urllib.request, urllib.parse
+           - 加密：hashlib, base64
+           - 邮件：imaplib, email.*, smtplib
+        
+        3. 安全导入函数：拦截所有导入请求
+           - 检查模块名是否在白名单中
+           - 不在白名单则抛出 ImportError
+    
+    执行环境:
+        - __builtins__: 受限内置函数
+        - tool: @tool 装饰器（用于注册工具）
+        - log: 日志记录器
+    
+    设计考虑:
+        - 防止插件执行恶意代码
+        - 防止访问系统资源
+        - 防止网络请求（除白名单模块）
+        - 保持插件功能足够实用
+    
+    使用场景:
+        - 用户自定义工具
+        - 第三方集成
+        - 实验性功能
     """
     import builtins as _bi
     safe_builtins = {k: getattr(_bi, k) for k in dir(_bi)
                      if k not in ("eval", "exec", "compile", "__import__",
                                   "globals", "locals", "breakpoint", "exit", "quit")}
-    # Provide safe import: only allow whitelisted modules
+    # Provide safe import: only allow whitelisted modules (安全导入：仅允许白名单模块)
     _IMPORT_WHITELIST = {"json", "os", "os.path", "re", "math", "time", "datetime",
                          "urllib.request", "urllib.parse", "hashlib", "base64",
                          "imaplib", "email", "email.header", "email.utils", "email.mime.text",

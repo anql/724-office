@@ -1,6 +1,25 @@
 """
-Messaging / file / scheduling / media tools
 消息/文件/调度/媒体工具
+
+用户交互类工具集合，处理日常任务。
+
+功能分类:
+1. 命令执行：exec（带超时和黑名单）
+2. 文件操作：read_file, write_file, edit_file, list_files
+3. 调度任务：schedule, list_schedules, remove_schedule
+4. 媒体发送：send_image, send_file, send_video, send_link, send_location, send_namecard
+5. 位置服务：search_nearby（POI 搜索 + 坐标缓存）
+
+安全特性:
+- exec 命令黑名单（15+ 危险命令）
+- 超时限制（默认 60 秒，最大 300 秒）
+- POI 坐标缓存（减少重复搜索）
+
+设计原则:
+- 用户友好（自动缓存、智能匹配）
+- 安全第一（黑名单、超时）
+- 幂等性（可重复执行）
+- 详细错误信息
 """
 
 import json
