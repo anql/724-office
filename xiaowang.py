@@ -1,16 +1,33 @@
 """
 AI 助手 - 入口文件 (Entry Point)
 
-启动 HTTP 服务器，接收消息平台回调，调用工具使用循环。
+系统的 HTTP 服务器和消息路由中枢。
+
+核心功能:
+1. HTTP 服务器：接收消息平台回调
+2. 配置加载：多租户用户路由表
+3. 消息去重：合并短时间内的连续消息
+4. 媒体处理：下载、ASR 语音识别
+5. 群聊支持：@提及过滤、上下文缓冲
+6. 路由分发：转发到对应用户容器
+
 模块结构:
   xiaowang.py  — 入口：配置、HTTP 服务器、回调处理、消息去重（本文件）
   llm.py       — LLM 调用 + 工具使用循环 + 会话管理
   tools.py     — 工具注册表（只在这里添加工具）
   messaging.py — 消息 API 封装（文本/图片/文件/视频/链接/CDN）
   scheduler.py — 内置调度器（一次性任务 + 定时任务）
+  memory.py    — 三层记忆系统（会话 + 压缩 + 向量）
+  router.py    — Docker 路由器（多租户容器编排）
+
+技术特性:
+- WebSocket 流式 ASR（讯飞 API）
+- 消息去重缓冲区（1.5 秒窗口）
+- 群聊上下文缓冲（最后 20 条消息）
+- 媒体文件持久化存储
+- 多租户隔离（独立工作空间）
 
 使用方法：python3 xiaowang.py
-Usage: python3 xiaowang.py
 """
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
