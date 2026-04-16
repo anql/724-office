@@ -1,6 +1,41 @@
 """
-Search Tools — web_search + memory/recall
 搜索工具 — 网络搜索 + 记忆/回忆
+
+多引擎搜索工具集合，支持智能路由。
+
+搜索引擎:
+1. Tavily API: 英文内容质量高
+   - AI 生成的答案摘要
+   - 相关性评分
+   - 原始内容片段
+   
+2. Bocha API: 中文内容优化
+   - 中文搜索结果
+   - 本地化内容
+   
+3. GitHub API: 代码和仓库搜索
+   - 仓库搜索
+   - 代码搜索
+   - 需要 GitHub Token
+   
+4. HuggingFace API: 模型搜索
+   - AI 模型发现
+   - 需要 HF Token
+
+记忆搜索:
+- search_memory: grep 实现，关键词匹配
+- recall: 向量语义检索（LanceDB）
+
+智能路由:
+- auto 模式：根据关键词自动选择引擎
+- 中文优先 Bocha，英文优先 Tavily
+- 默认双引擎（Tavily + Bocha）
+
+使用场景:
+- 事实查询
+- 最新信息获取
+- 代码/模型发现
+- 历史对话回忆
 """
 
 import json

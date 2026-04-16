@@ -1,12 +1,36 @@
 """
-Video processing tools — trim, bgm, generate, auto_cut (silence removal)
 视频处理工具 — 剪辑、背景音乐、生成、自动剪辑（静音移除）
 
-本模块提供完整的视频处理功能：
-- trim_video: 剪辑视频（手动或自动移除静音）
-- add_bgm: 添加背景音乐
-- generate_video: 生成视频（从图片/文本）
-- 自动静音检测和移除
+本模块提供完整的视频处理功能，基于 FFmpeg 实现。
+
+功能列表:
+1. trim_video: 剪辑视频
+   - 手动指定时间范围
+   - 自动移除静音片段（silencedetect）
+   - 智能首尾静音切除
+   
+2. add_bgm: 添加背景音乐
+   - 自动调整 BGM 音量
+   - 保留原视频音频
+   - 循环/截断 BGM 适配视频长度
+   
+3. generate_video: 生成视频
+   - 从图片序列生成
+   - 从文本生成（AI API）
+   - 支持多种格式
+
+技术特性:
+- FFmpeg 命令行调用
+- URL 和本地文件统一处理
+- 按年月组织输出文件
+- 自动压缩优化（H.264）
+- 静音检测算法（能量阈值）
+
+使用场景:
+- 视频剪辑和精修
+- 添加背景音乐
+- 移除冗余静音片段
+- AI 视频生成
 """
 
 import json
