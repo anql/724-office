@@ -237,8 +237,37 @@ def _save_files_index(index):
 
 
 def save_media_file(tmp_path, media_type, filename="", files_dir=None):
-    """Move temp file to persistent storage, return persistent path
-    移动临时文件到持久化存储，返回持久化路径
+    """将临时媒体文件移动到持久化存储
+    
+    处理用户发送的图片、视频、语音、文件等，保存到工作空间并按年月组织。
+    
+    参数:
+        tmp_path: 临时文件路径（下载到/tmp/的文件）
+        media_type: 媒体类型（image/video/voice/file）
+        filename: 原始文件名（可选）
+        files_dir: 目标目录（可选，默认 FILES_DIR）
+    
+    返回:
+        str: 持久化存储的文件路径
+    
+    文件组织:
+        - 按年月分类：workspace/files/YYYY-MM/
+        - 文件名格式：{时间戳毫秒}_{随机数}_{原始文件名}
+        - 随机数防止同一毫秒上传冲突
+    
+    索引记录:
+        - 保存到 files/index.json
+        - 记录路径、类型、文件名、大小、时间
+    
+    安全处理:
+        - 替换路径分隔符防止目录遍历
+        - 默认扩展名 .bin（未知类型）
+        - OSError 时降级使用 shutil.move
+    
+    使用场景:
+        - 用户发送图片/视频/语音
+        - 下载网络资源
+        - 工具生成的文件
     """
     from datetime import datetime, timezone, timedelta
     CST = timezone(timedelta(hours=8))  # 中国标准时间 (China Standard Time)
@@ -288,8 +317,47 @@ XFYUN_CONFIG = CONFIG.get("xfyun", {})  # 讯飞语音配置 (iFlytek voice conf
 
 
 def xfyun_asr(audio_path):
-    """WebSocket ASR: audio file -> text
-    WebSocket 自动语音识别：音频文件转文本
+    """讯飞 WebSocket 流式语音识别
+    
+    将音频文件转换为文本，支持 silk 和其他格式。
+    
+    参数:
+        audio_path: 音频文件路径（.silk/.mp3/.wav 等）
+    
+    返回:
+        str: 识别的文本内容，失败返回 None
+    
+    转码流程:
+        1. 检测文件头判断是否为 silk 格式
+        2. silk 格式：使用 pilk 库解码为 PCM（16kHz）
+        3. 其他格式：使用 ffmpeg 转码为 PCM（16kHz, 16bit, 单声道）
+    
+    WebSocket 识别:
+        - 讯飞 API 端点：wss://iat-api.xfyun.cn/v2/iat
+        - 鉴权：HMAC-SHA256 签名（APIKey + APISecret）
+        - 分帧发送：每帧 40ms 音频（1280 字节@16kHz）
+        - 流式识别：实时返回中间结果
+    
+    签名算法:
+        1. 构建原始字符串：host + date + signature path
+        2. HMAC-SHA256 签名（APISecret）
+        3. Base64 编码生成 authorization 头
+    
+    错误处理:
+        - 配置缺失：返回 None
+        - 转码失败：记录错误，返回 None
+        - WebSocket 错误：记录错误，返回 None
+        - 清理临时 PCM 文件
+    
+    性能日志:
+        - 记录转码时间
+        - 记录识别总耗时
+        - 记录识别结果长度
+    
+    使用场景:
+        - 微信语音消息识别
+        - 语音输入转文本
+        - 会议记录转录
     """
     if not XFYUN_CONFIG:
         return None
